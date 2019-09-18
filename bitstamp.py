@@ -7,7 +7,8 @@ import time
 import json
 import urllib
 import uuid
-from websocket import create_connection
+import pymongo
+import websocket
 
 class Bitstamp:
   key    = 'Mki3wDj0koY516iMKw6DXH88DeX0wN9K'
@@ -24,16 +25,31 @@ class Bitstamp:
     return self.s.post(self.url + uri, **kargs)
 
   def listen(self):
-    ws = create_connection("wss://ws.bitstamp.net")
-    ws.send(json.dumps({
-      "event": "bts:subscribe",
-      "data": {
-        "channel": "live_orders_ethbtc"
-      }
-    }))
-    while True:
-      result = ws.recv()
-      result = json.loads(result)
+    try:
+      client = pymongo.MongoClient('mongodb://localhost:27017/')
+      db = client.mmm
+      ws = websocket.create_connection("wss://ws.bitstamp.net")
+      ws.send(json.dumps({
+        "event": "bts:subscribe",
+        "data": {
+          "channel": "diff_order_book_ethbtc"
+        }
+      }))
+      while True:
+        result = ws.recv()
+        obj = json.loads(result)
+        print(obj)
+        obj = {
+          '_localtime': time.time(),
+          'obj' : obj,
+        }
+        db.bitstamp.insert_one(obj)
+    except KeyboardInterrupt:
+      #print('Reading from db:')
+      #for item in db.bitstamp.find():
+      #  print(item)
+      print('Done.')
+      client.close()
 
   def gensig(self, uri, **params):
     timestamp = str(int(time.time() * 1000))
@@ -60,8 +76,9 @@ class Bitstamp:
 
 if __name__ == '__main__':
   b = Bitstamp()
-  r = b.post('/api/v2/user_transactions/', is_signed=True, offset='1')
+  #r = b.post('/api/v2/user_transactions/', is_signed=True, offset='1')
   #r = b.post('/api/v2/ticker/btcusd/')
-  print(r.json())
+  #print(r.json())
+  b.listen()
 
 

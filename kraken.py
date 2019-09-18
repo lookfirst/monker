@@ -7,6 +7,7 @@ import time
 import urllib.parse
 import base64
 import json
+import pymongo
 import websocket
 
 class Kraken:
@@ -44,23 +45,34 @@ class Kraken:
     return data['result']['token']
 
   def listen(self):
-    ws = websocket.create_connection("wss://ws.kraken.com")
-    ws.send(json.dumps({
-      "event": "subscribe",
-      #"event": "ping",
-      "pair": ["XBT/USD", "XBT/EUR"],
-      #"subscription": {"name": "ticker"}
-      #"subscription": {"name": "spread"}
-      "subscription": {
-        "name": "ticker",
-      }
-      #"subscription": {"name": "book", "depth": 10}
-      #"subscription": {"name": "ohlc", "interval": 5}
-    }))
-    while True:
-      result = ws.recv()
-      print(json.loads(result))
+    try:
+      client = pymongo.MongoClient('mongodb://localhost:27017/')
+      db = client.mmm
+      ws = websocket.create_connection("wss://ws.kraken.com")
+      ws.send(json.dumps({
+        "event" : "subscribe",
+        "pair"  : ["ETH/XBT"],
+        "subscription": {"name": "book", "depth": 100}
+      }))
+      while True:
+        result = ws.recv()
+        obj = json.loads(result)
+        print(obj)
+        if 'connectionID' in obj:
+          print('Skiped.')
+          continue
+        obj = {
+          '_localtime': time.time(),
+          'obj' : obj,
+        }
+        db.kraken.insert_one(obj)
+    except KeyboardInterrupt:
+      #print('Reading from db:')
+      #for item in db.kraken.find():
+      #  print(item)
+      print('Done.')
+      client.close()
 
 if __name__ == '__main__':
   k = Kraken()
-  embed()
+  k.listen()

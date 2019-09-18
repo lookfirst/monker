@@ -8,7 +8,7 @@ import base64
 import json
 import urllib
 import pymongo
-from websocket import create_connection
+import websocket
 
 class Binance:
   key    = 'O9YNhkjieyoDY1xO0oLPcr4LIbTwv1xOBqisQbRnRNvuBlatj3zeKzZgcWxMtSMD'
@@ -39,16 +39,20 @@ class Binance:
     try:
       client = pymongo.MongoClient('mongodb://localhost:27017/')
       db = client.mmm
-      ws = create_connection("wss://stream.binance.com:9443/ws/bnbbtc@depth")
+      ws = websocket.create_connection("wss://stream.binance.com:9443/ws/ethbtc@depth@100ms")
       while True:
         result = ws.recv()
         obj = json.loads(result)
+        obj = {
+          '_localtime': time.time(),
+          'obj' : obj,
+        }
         db.binance.insert_one(obj)
         print(obj)
     except KeyboardInterrupt:
-      print('Reading from db:')
-      for item in db.binance.find():
-        print(item)
+      #print('Reading from db:')
+      #for item in db.binance.find():
+      #  print(item)
       print('Done.')
       client.close()
 
