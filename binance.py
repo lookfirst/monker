@@ -43,12 +43,12 @@ class Binance:
       while True:
         result = ws.recv()
         obj = json.loads(result)
+        print(obj)
         obj = {
           '_localtime': time.time(),
           'obj' : obj,
         }
         db.binance.insert_one(obj)
-        print(obj)
     except KeyboardInterrupt:
       #print('Reading from db:')
       #for item in db.binance.find():

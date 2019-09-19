@@ -56,7 +56,11 @@ class Kraken:
       }))
       while True:
         result = ws.recv()
-        obj = json.loads(result)
+        try:
+          obj = json.loads(result)
+        except json.decoder.JSONDecodeError:
+          print('Decode error.')
+          continue
         print(obj)
         if 'connectionID' in obj:
           print('Skiped.')
