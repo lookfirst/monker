@@ -9,7 +9,7 @@ class Binance(OrderBook):
     url    = 'https://api.binance.com'
 
     def __init__(self):
-        super().__init__(is_absolute=True)
+        super().__init__()
         self.s = requests.Session()
         self.s.headers.update({
             'Accept'       : 'application/json',

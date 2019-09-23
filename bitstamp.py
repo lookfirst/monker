@@ -9,7 +9,7 @@ class Bitstamp(OrderBook):
     url    = 'https://www.bitstamp.net'
 
     def __init__(self):
-        super().__init__(is_absolute=False)
+        super().__init__()
         self.s = requests.Session()
         self.s.headers.update({
             'Accept'       : 'application/json',
@@ -53,23 +53,20 @@ class Bitstamp(OrderBook):
         ws.send(json.dumps({
             "event": "bts:subscribe",
             "data": {
-                "channel": "live_orders_ethbtc"
+                "channel": "order_book_ethbtc"
             }
         }))
         while not self.stop_flag.is_set():
             self.update_book(json.loads(ws.recv()))
 
     def update_book(self, obj):
-        data = obj['data']
-        if data:
-            price      = data.get('price')
-            qnty       = data.get('amount')
-            order_type = data.get('order_type')
-            event      = 1 if obj.get('event') == 'order_created' else -1
-            if order_type  == 0:
-                self.bids.add(Order(price, qnty*event))
-            else:
-                self.asks.add(Order(price, qnty*event))
+        if obj['event'] == 'data':
+            data = obj['data']
+            self.flush()
+            for bid in data['bids']:
+                self.bids.add(Order(*bid))
+            for ask in data['asks']:
+                self.asks.add(Order(*ask))
 
 if __name__ == '__main__':
     b = Bitstamp()

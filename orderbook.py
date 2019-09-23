@@ -8,31 +8,22 @@ class Order:
         return f'Order({self.price:.2f}, {self.qnty})'
 
 class Book(dict):
-    def __init__(self, is_absolute):
+    def __init__(self):
         super().__init__()
-        self.is_absolute = is_absolute
 
     def add(self, order):
-        if self.is_absolute:
-            if order.qnty > 0.0:
-                self[order.price] = order
-            else:
-                try:
-                    del self[order.price]
-                except KeyError:
-                    pass
+        if order.qnty > 0.0:
+            self[order.price] = order
         else:
-            if order.price not in self:
-                self[order.price] = order
-            else:
-                self[order.price].qnty += order.qnty
-                if abs(self[order.price].qnty) < 1e-15:
-                    del self[order.price]
+            try:
+                del self[order.price]
+            except KeyError:
+                pass
 
 class OrderBook:
-    def __init__(self, is_absolute):
-        self.asks = Book(is_absolute)
-        self.bids = Book(is_absolute)
+    def __init__(self):
+        self.bids = Book()
+        self.asks = Book()
 
     def _get_price_for(self, book, qnty):
         total_price = 0.0
@@ -44,11 +35,15 @@ class OrderBook:
                 break
         return total_price
 
-    def get_ask_for(self, qnty):
-        return self._get_price_for(self.asks, qnty)
+    def flush(self):
+        self.bids.clear()
+        self.asks.clear()
 
     def get_bid_for(self, qnty):
         return self._get_price_for(self.bids, qnty)
+
+    def get_ask_for(self, qnty):
+        return self._get_price_for(self.asks, qnty)
 
     def update_book(self, objs):
         ## implement this on extended classes...
