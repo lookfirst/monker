@@ -7,7 +7,7 @@ Create python environment:
 
 ```
 $ sudo apt install python3-pip python3-virtualenv virtualenv
-$ virtualenv -p /usr/bin/python3 tmp/mmm
+$ virtualenv -p /usr/bin/python3 tmp/monker
 $ source tmp/mmm/bin/activate.csh
 ```
 

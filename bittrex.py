@@ -1,33 +1,8 @@
-import hashlib, hmac, time, base64
-import json, urllib, threading
+import signalr_aio, base64, zlib, hashlib, hmac
+import time, urllib, threading, json
+import requests, asyncio, websockets
 
 from orderbook import OrderBook, Order
-
-## the imports below should be in this order
-import gevent.monkey
-gevent.monkey.patch_all()
-import requests, signalr
-
-# QueryExchangeState
-# get full order book
-# params
-# market: string
-# the market identifier (e.g. BTC-ETH)
-# 
-# SubscribeToExchangeDeltas
-# Allows the caller to receive real-time updates to the state of a single market
-# marketName: string
-# the market identifier (e.g. BTC-ETH)
-# 
-# Success
-# Boolean indicating whether the user was subscribed to the feed
-# 
-# Drop existing websocket connections and flush accumulated data and state (e.g. market nonces).
-# Re-establish websocket connection.
-# Subscribe to BTC-ETH market deltas, cache received data keyed by nonce.
-# Query BTC-ETH market state.
-# Apply cached deltas sequentially, starting with nonces greater than that received in step 4.
-
 
 class Bittrex(OrderBook):
     key    = '15f7f668f7b548e08ebd7b50e8e1b544'
@@ -37,31 +12,34 @@ class Bittrex(OrderBook):
     def __init__(self):
         super().__init__()
         self.s = requests.Session()
-        self.stop_flag = threading.Event()
         self.thread = threading.Thread(target=self.thread_entry_point)
+        self.conn = None
 
-    def market_data(self, *args, **kwargs):
-        print ('mkt', (args, kwargs))
+    def process_message(self, msg):
+        deflated_msg = zlib.decompress(base64.b64decode(msg, validate=True), -zlib.MAX_WBITS)
+        return json.loads(deflated_msg.decode())
+
+    async def on_receive(self, **msg):
+        print('on_receive', msg)
+        if 'R' in msg and type(msg['R']) is not bool:
+            decoded_msg = self.process_message(msg['R'])
+            print(decoded_msg)
+
+    async def on_exchange_deltas(self, msg):
+        decoded_msg = self.process_message(msg[0])
+        print(decoded_msg)
 
     def thread_entry_point(self):
-        server = "https://socket.bittrex.com/signalr"
-        conn = signalr.Connection(server, self.s)
-        corehub = conn.register_hub('corehub')
-
-        #conn.received += self.market_data
-        #conn.error += self.market_data
-
-        conn.start()
-        #corehub.client.on('uE', self.market_data)
-        corehub.client.on('updateExchangeState', self.market_data)
-        corehub.server.invoke('SubscribeToExchangeDeltas', 'BTC-ETH')
-        conn.wait(500)
-
-        # You missed this part
-
-        while not self.stop_flag.is_set():
-            time.sleep(1)
-        #    self.update_book(json.loads(ws.recv()))
+        try:
+            self.conn = signalr_aio.Connection('https://beta.bittrex.com/signalr', session=None)
+            hub = self.conn.register_hub('c2')
+            self.conn.received += self.on_receive
+            hub.client.on('uE', self.on_exchange_deltas)
+            hub.server.invoke('SubscribeToExchangeDeltas', 'BTC-ETH')
+            hub.server.invoke('QueryExchangeState', 'BTC-ETH')
+            self.conn.start()
+        except websockets.exceptions.ConnectionClosedOK:
+            pass
 
     def update_book(self, obj):
         if obj['event'] == 'data':
@@ -86,7 +64,7 @@ if __name__ == '__main__':
             print('Asks:')
             pprint(b.asks)
     except KeyboardInterrupt:
-        b.stop_flag.set()
+        b.conn.close()
         b.thread.join()
         print('\nquitting politely')
 
