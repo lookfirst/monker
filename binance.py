@@ -1,65 +1,90 @@
-#!/usr/bin/env python3
-from IPython import embed
-import requests
-import hashlib
-import hmac
-import time
-import base64
-import json
-import urllib
-import pymongo
-import websocket
+import requests, hashlib, hmac, time, base64
+import json, urllib, pymongo, websocket, threading
 
-class Binance:
-  key    = 'O9YNhkjieyoDY1xO0oLPcr4LIbTwv1xOBqisQbRnRNvuBlatj3zeKzZgcWxMtSMD'
-  secret = 'Rzl9apnCoqJr6rKslB9pFnCsBRqFWeYgyVS9naDOckjaThb1fO2PkzqD1eTvbY9n'
-  url    = 'https://api.binance.com'
+from orderbook import OrderBook, Order
 
-  def __init__(self):
-    self.s = requests.Session()
-    self.s.headers.update({
-      'Accept'       : 'application/json',
-      'User-Agent'   : 'mmm',
-      'X-MBX-APIKEY' : self.key,
-    })
+class Binance(OrderBook):
+    key    = 'O9YNhkjieyoDY1xO0oLPcr4LIbTwv1xOBqisQbRnRNvuBlatj3zeKzZgcWxMtSMD'
+    secret = 'Rzl9apnCoqJr6rKslB9pFnCsBRqFWeYgyVS9naDOckjaThb1fO2PkzqD1eTvbY9n'
+    url    = 'https://api.binance.com'
 
-  def gensig(self, **params):
-    q = urllib.parse.urlencode(params)
-    m = hmac.new(self.secret.encode(), q.encode(), hashlib.sha256)
-    return m.hexdigest()
+    def __init__(self):
+        super().__init__(is_absolute=True)
+        self.s = requests.Session()
+        self.s.headers.update({
+            'Accept'       : 'application/json',
+            'User-Agent'   : 'monker',
+            'X-MBX-APIKEY' : self.key,
+        })
+        self.stop_flag = threading.Event()
+        self.thread = threading.Thread(target=self.thread_entry_point)
 
-  def get(self, uri, is_signed=False, **params):
-    if is_signed:
-      params['timestamp'] = int(time.time() * 1000)
-      params['signature'] = self.gensig(**params)
-    params = urllib.parse.urlencode(params)
-    return self.s.get(self.url + uri, params=params)
+    def sign(self, **params):
+        q = urllib.parse.urlencode(params)
+        m = hmac.new(self.secret.encode(), q.encode(), hashlib.sha256)
+        return m.hexdigest()
 
-  def listen(self):
-    try:
-      client = pymongo.MongoClient('mongodb://localhost:27017/')
-      db = client.mmm
-      ws = websocket.create_connection("wss://stream.binance.com:9443/ws/ethbtc@depth@100ms")
-      while True:
-        result = ws.recv()
-        obj = json.loads(result)
-        print(obj)
-        obj = {
-          '_localtime': time.time(),
-          'obj' : obj,
-        }
-        db.binance.insert_one(obj)
-    except KeyboardInterrupt:
-      #print('Reading from db:')
-      #for item in db.binance.find():
-      #  print(item)
-      print('Done.')
-      client.close()
+    def get(self, uri, is_signed, **params):
+        if is_signed:
+            params['timestamp'] = int(time.time() * 1000)
+            params['signature'] = self.sign(**params)
+        params = urllib.parse.urlencode(params)
+        return self.s.get(self.url + uri, params=params)
 
+    def thread_entry_point(self):
+        def merge(book, buff):
+            full_book = {
+                'b': [ order for order in book['bids'] ],
+                'a': [ order for order in book['asks'] ],
+            }
+            last_updated_id = int(book['lastUpdateId'])
+            for obj in buff:
+                u = int(obj['u'])
+                U = int(obj['U'])
+                if u <= last_updated_id:
+                    continue
+                assert(U <= last_updated_id+1 and u >= last_updated_id+1)
+                book['b'].extend(obj['b'])
+                book['a'].extend(obj['a'])
+            return full_book
+        server = "wss://stream.binance.com:9443/ws/ethbtc@depth@100ms"
+        ws = websocket.create_connection(server)
+        buff = []
+        while not self.stop_flag.is_set() and len(buff) < 10:
+            buff.append(json.loads(ws.recv()))
+        r = self.get('/api/v1/depth', False, symbol="ETHBTC", limit=5)
+        objs = merge(r.json(), buff)
+        self.update_book(objs)
+        prv_u = None
+        while not self.stop_flag.is_set():
+            obj = json.loads(ws.recv())
+            if prv_u is not None:
+                if int(obj['U']) != prv_u + 1:
+                    break
+            prv_u = int(obj['u'])
+            self.update_book(obj)
+
+    def update_book(self, objs):
+        for bid in objs['b']:
+            self.bids.add(Order(*bid))
+        for ask in objs['a']:
+            self.asks.add(Order(*ask))
 
 if __name__ == '__main__':
-  b = Binance()
-  #r = b.get('/api/v3/allOrders', is_signed=True, symbol="LTCBTC")
-  #print(r.json())
-  b.listen()
+    b = Binance()
+    b.thread.start()
+    try:
+        from pprint import pprint
+        while True:
+            time.sleep(2)
+            if not b.thread.is_alive():
+                print('thread has died')
+            print('Bids:')
+            pprint(b.bids)
+            print('Asks:')
+            pprint(b.asks)
+    except KeyboardInterrupt:
+        b.stop_flag.set()
+        b.thread.join()
+        print('\nquitting politely')
 

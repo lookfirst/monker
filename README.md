@@ -14,8 +14,3 @@ $ source tmp/mmm/bin/activate.csh
 Install MongoDB with instructions from (do not install ubuntu default package):
 <https://docs.mongodb.com/manual/tutorial/install-mongodb-on-ubuntu/>
 
-# Ideas
- - use multiple exchange data to build a short term prediction model
- - arbitrage uses 2x withdraw, buy cheap in one, sell in another
- - use bitcoin price to take an edge on altcoins price
-

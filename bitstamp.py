@@ -1,84 +1,91 @@
-#!/usr/bin/env python3
-from IPython import embed
-import requests
-import hashlib
-import hmac
-import time
-import json
-import urllib
-import uuid
-import pymongo
-import websocket
+import requests, hashlib, hmac, time, json
+import urllib, uuid, pymongo, websocket, threading
 
-class Bitstamp:
-  key    = 'Mki3wDj0koY516iMKw6DXH88DeX0wN9K'
-  secret = 'mutSyNjOR61rBhUP8vZuFNKbGN48z2YI'
-  url    = 'https://www.bitstamp.net'
+from orderbook import OrderBook, Order
 
-  def __init__(self):
-    self.s = requests.Session()
+class Bitstamp(OrderBook):
+    key    = 'Mki3wDj0koY516iMKw6DXH88DeX0wN9K'
+    secret = 'mutSyNjOR61rBhUP8vZuFNKbGN48z2YI'
+    url    = 'https://www.bitstamp.net'
 
-  def post(self, uri, is_signed=False, **params):
-    kargs = { 'data' : urllib.parse.urlencode(params) }
-    if is_signed:
-      kargs.setdefault('headers', self.gensig(uri, **params))
-    return self.s.post(self.url + uri, **kargs)
+    def __init__(self):
+        super().__init__(is_absolute=False)
+        self.s = requests.Session()
+        self.s.headers.update({
+            'Accept'       : 'application/json',
+            'User-Agent'   : 'monker',
+        })
+        self.stop_flag = threading.Event()
+        self.thread = threading.Thread(target=self.thread_entry_point)
 
-  def listen(self):
-    try:
-      client = pymongo.MongoClient('mongodb://localhost:27017/')
-      db = client.mmm
-      ws = websocket.create_connection("wss://ws.bitstamp.net")
-      ws.send(json.dumps({
-        "event": "bts:subscribe",
-        "data": {
-          "channel": "diff_order_book_ethbtc"
+    def post(self, uri, is_signed, **params):
+        kargs = { 'data' : urllib.parse.urlencode(params) }
+        if is_signed:
+            kargs.setdefault('headers', self.sign(uri, **params))
+        return self.s.post(self.url + uri, **kargs)
+
+    def sign(self, uri, **params):
+        timestamp = str(int(time.time() * 1000))
+        nonce = str(uuid.uuid4())
+        content_type = 'application/x-www-form-urlencoded'
+        params_url = urllib.parse.urlencode(params)
+        url = 'www.bitstamp.net' + uri
+        message = (
+            'BITSTAMP ' + self.key + 'POST' + url + content_type +
+            nonce + timestamp + 'v2' + params_url
+        )
+        signature = hmac.new(Bitstamp.secret.encode(),
+                             msg=message.encode(),
+                             digestmod=hashlib.sha256).hexdigest()
+        headers = {
+                'X-Auth'           : 'BITSTAMP ' + Bitstamp.key,
+                'X-Auth-Signature' : signature,
+                'X-Auth-Nonce'     : nonce,
+                'X-Auth-Timestamp' : timestamp,
+                'X-Auth-Version'   : 'v2',
+                'Content-Type'     : content_type,
         }
-      }))
-      while True:
-        result = ws.recv()
-        obj = json.loads(result)
-        print(obj)
-        obj = {
-          '_localtime': time.time(),
-          'obj' : obj,
-        }
-        db.bitstamp.insert_one(obj)
-    except KeyboardInterrupt:
-      #print('Reading from db:')
-      #for item in db.bitstamp.find():
-      #  print(item)
-      print('Done.')
-      client.close()
+        return headers
 
-  def gensig(self, uri, **params):
-    timestamp = str(int(time.time() * 1000))
-    nonce = str(uuid.uuid4())
-    content_type = 'application/x-www-form-urlencoded'
-    params_url = urllib.parse.urlencode(params)
-    url = 'www.bitstamp.net' + uri
-    message = (
-      'BITSTAMP ' + self.key + 'POST' + url + content_type +
-      nonce + timestamp + 'v2' + params_url
-    )
-    signature = hmac.new(Bitstamp.secret.encode(),
-                         msg=message.encode(),
-                         digestmod=hashlib.sha256).hexdigest()
-    headers = {
-        'X-Auth'            : 'BITSTAMP ' + Bitstamp.key,
-        'X-Auth-Signature'  : signature,
-        'X-Auth-Nonce'      : nonce,
-        'X-Auth-Timestamp'  : timestamp,
-        'X-Auth-Version'    : 'v2',
-        'Content-Type'      : content_type,
-    }
-    return headers
+    def thread_entry_point(self):
+        server = "wss://ws.bitstamp.net"
+        ws = websocket.create_connection(server)
+        ws.send(json.dumps({
+            "event": "bts:subscribe",
+            "data": {
+                "channel": "live_orders_ethbtc"
+            }
+        }))
+        while not self.stop_flag.is_set():
+            self.update_book(json.loads(ws.recv()))
+
+    def update_book(self, obj):
+        data = obj['data']
+        if data:
+            price      = data.get('price')
+            qnty       = data.get('amount')
+            order_type = data.get('order_type')
+            event      = 1 if obj.get('event') == 'order_created' else -1
+            if order_type  == 0:
+                self.bids.add(Order(price, qnty*event))
+            else:
+                self.asks.add(Order(price, qnty*event))
 
 if __name__ == '__main__':
-  b = Bitstamp()
-  #r = b.post('/api/v2/user_transactions/', is_signed=True, offset='1')
-  #r = b.post('/api/v2/ticker/btcusd/')
-  #print(r.json())
-  b.listen()
-
+    b = Bitstamp()
+    b.thread.start()
+    try:
+        from pprint import pprint
+        while True:
+            time.sleep(2)
+            if not b.thread.is_alive():
+                print('thread has died')
+            print('Bids:')
+            pprint(b.bids)
+            print('Asks:')
+            pprint(b.asks)
+    except KeyboardInterrupt:
+        b.stop_flag.set()
+        b.thread.join()
+        print('\nquitting politely')
 
