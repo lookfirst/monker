@@ -6,6 +6,8 @@ class Order:
         return repr(self)
     def __repr__(self):
         return f'Order({self.price:.2f}, {self.qnty})'
+    def dump(self):
+        return self.price, self.qnty
 
 class Book(dict):
     def __init__(self):
@@ -20,6 +22,9 @@ class Book(dict):
             except KeyError:
                 pass
 
+    def dump(self):
+        return [ order.dump() for order in self.values() ]
+
 class OrderBook:
     def __init__(self):
         self.bids = Book()
@@ -28,10 +33,9 @@ class OrderBook:
     def _get_price_for(self, book, qnty):
         total_price = 0.0
         for price in sorted(book):
-            total_price += price * book[price].qnty
+            total_price += price * qnty
             qnty -= book[price].qnty
             if qnty < 0:
-                total_price -= price * qnty
                 break
         return total_price
 
@@ -48,4 +52,13 @@ class OrderBook:
     def update_book(self, objs):
         ## implement this on extended classes...
         raise NotImplemented
+
+    def dump(self, **kargs):
+        obj = {
+            'bids' : self.bids.dump(),
+            'asks' : self.asks.dump(),
+        }
+        obj.update(kargs)
+        return obj
+
 

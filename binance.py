@@ -18,6 +18,9 @@ class Binance(OrderBook):
         })
         self.stop_flag = threading.Event()
         self.thread = threading.Thread(target=self.thread_entry_point)
+        self.db_client = pymongo.MongoClient('mongodb://localhost:27017/')
+        self.db = self.db_client.monker
+        self.thread.start()
 
     def sign(self, **params):
         q = urllib.parse.urlencode(params)
@@ -47,12 +50,12 @@ class Binance(OrderBook):
                 book['b'].extend(obj['b'])
                 book['a'].extend(obj['a'])
             return full_book
-        server = "wss://stream.binance.com:9443/ws/ethbtc@depth@100ms"
+        server = "wss://stream.binance.com:9443/ws/btcusdt@depth@100ms"
         ws = websocket.create_connection(server)
         buff = []
         while not self.stop_flag.is_set() and len(buff) < 10:
             buff.append(json.loads(ws.recv()))
-        r = self.get('/api/v1/depth', False, symbol="ETHBTC", limit=5)
+        r = self.get('/api/v1/depth', False, symbol="BTCUSDT", limit=100)
         objs = merge(r.json(), buff)
         self.update_book(objs)
         prv_u = None
@@ -63,6 +66,9 @@ class Binance(OrderBook):
                     break
             prv_u = int(obj['u'])
             self.update_book(obj)
+    
+    def save(self):
+        self.db.binance.insert_one(self.dump(ts=time.time()))
 
     def update_book(self, objs):
         for bid in objs['b']:
@@ -70,21 +76,25 @@ class Binance(OrderBook):
         for ask in objs['a']:
             self.asks.add(Order(*ask))
 
+    def stop(self):
+        self.stop_flag.set()
+        self.thread.join()
+        
 if __name__ == '__main__':
     b = Binance()
-    b.thread.start()
     try:
         from pprint import pprint
         while True:
-            time.sleep(2)
+            time.sleep(1)
             if not b.thread.is_alive():
                 print('thread has died')
             print('Bids:')
             pprint(b.bids)
             print('Asks:')
             pprint(b.asks)
+            if b.bids or b.asks:
+                b.save()
     except KeyboardInterrupt:
-        b.stop_flag.set()
-        b.thread.join()
+        b.stop()
         print('\nquitting politely')
 

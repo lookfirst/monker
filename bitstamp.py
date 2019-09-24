@@ -17,6 +17,9 @@ class Bitstamp(OrderBook):
         })
         self.stop_flag = threading.Event()
         self.thread = threading.Thread(target=self.thread_entry_point)
+        self.db_client = pymongo.MongoClient('mongodb://localhost:27017/')
+        self.db = self.db_client.monker
+        self.thread.start()
 
     def post(self, uri, is_signed, **params):
         kargs = { 'data' : urllib.parse.urlencode(params) }
@@ -53,7 +56,7 @@ class Bitstamp(OrderBook):
         ws.send(json.dumps({
             "event": "bts:subscribe",
             "data": {
-                "channel": "order_book_ethbtc"
+                "channel": "order_book_btcusd"
             }
         }))
         while not self.stop_flag.is_set():
@@ -68,21 +71,28 @@ class Bitstamp(OrderBook):
             for ask in data['asks']:
                 self.asks.add(Order(*ask))
 
+    def save(self):
+        self.db.bitstamp.insert_one(self.dump(ts=time.time()))
+
+    def stop(self):
+        self.stop_flag.set()
+        self.thread.join()
+
 if __name__ == '__main__':
     b = Bitstamp()
-    b.thread.start()
     try:
         from pprint import pprint
         while True:
-            time.sleep(2)
+            time.sleep(1)
             if not b.thread.is_alive():
                 print('thread has died')
             print('Bids:')
             pprint(b.bids)
             print('Asks:')
             pprint(b.asks)
+            if b.bids or b.asks:
+                b.save()
     except KeyboardInterrupt:
-        b.stop_flag.set()
-        b.thread.join()
+        b.stop()
         print('\nquitting politely')
 
