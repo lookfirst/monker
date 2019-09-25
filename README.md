@@ -6,11 +6,7 @@ The incredible money maker machine.
 Create python environment:
 
 ```
-$ sudo apt install python3-pip python3-virtualenv virtualenv
+$ sudo apt install python3-pip python3-virtualenv virtualenv mongodb
 $ virtualenv -p /usr/bin/python3 tmp/monker
-$ source tmp/mmm/bin/activate.csh
+$ source tmp/monker/bin/activate.csh
 ```
-
-Install MongoDB with instructions from (do not install ubuntu default package):
-<https://docs.mongodb.com/manual/tutorial/install-mongodb-on-ubuntu/>
-

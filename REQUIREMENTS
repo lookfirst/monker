@@ -1,6 +1,4 @@
 requests
 websocket-client
-signalr-client-aio
 pymongo
-matplotlib
 numpy
