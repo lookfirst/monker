@@ -1,11 +1,11 @@
 import requests, hashlib, hmac, time, base64
 import json, urllib, pymongo, websocket, threading
 
-from orderbook import OrderBook, Order
+from orderbook import OrderBook, Order, Trade
 
 class Binance(OrderBook):
-    key    = 'O9YNhkjieyoDY1xO0oLPcr4LIbTwv1xOBqisQbRnRNvuBlatj3zeKzZgcWxMtSMD'
-    secret = 'Rzl9apnCoqJr6rKslB9pFnCsBRqFWeYgyVS9naDOckjaThb1fO2PkzqD1eTvbY9n'
+    key    = 'ZADfFZTF0Djk5HozzmbbPhK1TWqz9SROYaivOcQPbJPIEscP24Rhc8RzMGx7pvdz'
+    secret = '5SNpXT5wRqDBgEfvl7b2gTLq1fKnNqDmteFZMwXfrbOBKDLSt4QHA7Vu1UcIejYx'
     url    = 'https://api.binance.com'
 
     def __init__(self):
@@ -17,7 +17,7 @@ class Binance(OrderBook):
             'X-MBX-APIKEY' : self.key,
         })
         self.stop_flag = threading.Event()
-        self.thread = threading.Thread(target=self.thread_entry_point)
+        self.thread= threading.Thread(target=self.thread_entry_point)
         self.db_client = pymongo.MongoClient('mongodb://localhost:27017/')
         self.db = self.db_client.monker
         self.thread.start()
@@ -50,12 +50,12 @@ class Binance(OrderBook):
                 book['b'].extend(obj['b'])
                 book['a'].extend(obj['a'])
             return full_book
-        server = "wss://stream.binance.com:9443/ws/btcusdt@depth@100ms"
+        server = "wss://stream.binance.com:9443/ws/ethbtc@depth@100ms"
         ws = websocket.create_connection(server)
         buff = []
         while not self.stop_flag.is_set() and len(buff) < 10:
             buff.append(json.loads(ws.recv()))
-        r = self.get('/api/v1/depth', False, symbol="BTCUSDT", limit=100)
+        r = self.get('/api/v1/depth', False, symbol="ETHBTC", limit=100)
         objs = merge(r.json(), buff)
         self.update_book(objs)
         prv_u = None
@@ -66,7 +66,9 @@ class Binance(OrderBook):
                     break
             prv_u = int(obj['u'])
             self.update_book(obj)
-    
+            r = self.get('/api/v1/trades', False, symbol="ETHBTC", limit=10)
+            self.update_trades(r.json())
+
     def save(self):
         self.db.binance.insert_one(self.dump(ts=time.time()))
 
@@ -75,6 +77,12 @@ class Binance(OrderBook):
             self.bids.add(Order(*bid))
         for ask in objs['a']:
             self.asks.add(Order(*ask))
+
+    def update_trades(self, trades):
+        for trade in trades:
+            self.trades.append(Trade(float(trade['time'])/1000,
+                                     trade['price'],
+                                     trade['qty']))
 
     def stop(self):
         self.stop_flag.set()
@@ -92,8 +100,10 @@ if __name__ == '__main__':
             pprint(b.bids)
             print('Asks:')
             pprint(b.asks)
-            if b.bids or b.asks:
-                b.save()
+            print('Trades:')
+            pprint(b.trades)
+            #if b.bids or b.asks or b.trades:
+            #    b.save()
     except KeyboardInterrupt:
         b.stop()
         print('\nquitting politely')

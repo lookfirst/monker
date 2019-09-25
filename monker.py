@@ -7,7 +7,7 @@ from binance import Binance
 from bitstamp import Bitstamp
 from bittrex import Bittrex
 
-AMOUNT = 0.2
+AMOUNT = 0.5
 
 def putc(c):
     stdout.write(c)
@@ -19,35 +19,27 @@ def monker():
         bitstamp = Bitstamp()
         bittrex = Bittrex()
        
-        print('loading order book')
+        print(f'binance_bid,binance_ask,binance_quote,bittrex_bid,bittrex_ask,bittrex_quote')
+
         while not (binance.asks  and
                    bitstamp.asks and
                    bittrex.asks):
             time.sleep(1)
-            putc('.')
-        stdout.write('\n')
-
-        print('starting monitoring prices')
 
         while True:
             time.sleep(1)
-            putc('.')
 
-            binance_price  = binance.get_ask_for(AMOUNT)
-            bitstamp_price = bitstamp.get_ask_for(AMOUNT)
-            bittrex_price  = bittrex.get_ask_for(AMOUNT)
-            print('\n----------\nprices:')
-            print(f'  {binance_price:.2f}')
-            print(f'  {bitstamp_price:.2f}')
-            print(f'  {bittrex_price:.2f}')
+            binance_bid  = binance.get_bid_for(AMOUNT)
+            binance_ask  = binance.get_ask_for(AMOUNT)
+            binance_quote  = binance.get_trading_quote()
 
-            #d = binance_price - bitstamp_price 
-            #if abs(d) > 1.5:
-            #    print(f'\nbinance_price - bitstamp_price = {d:.2f}')
+            #bitstamp_price = bitstamp.get_ask_for(AMOUNT)
 
-            #d = binance_price - bittrex_price 
-            #if abs(d) > 1.5:
-            #    print(f'\nbinance_price - bittrex_price = {d:.2f}')
+            bittrex_bid  = bittrex.get_bid_for(AMOUNT)
+            bittrex_ask  = bittrex.get_ask_for(AMOUNT)
+            bittrex_quote  = bittrex.get_trading_quote()
+
+            print(f'{binance_bid:.06f},{binance_ask:.06f},{binance_quote:.06f},{bittrex_bid:.06f},{bittrex_ask:.06f},{bittrex_quote:.06f}')
 
     except KeyboardInterrupt:
         print('\nexiting politely')

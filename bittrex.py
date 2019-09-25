@@ -3,12 +3,12 @@ import time, urllib, threading, json, pymongo
 import requests, asyncio, websockets
 from pdb import set_trace as trace
 
-from orderbook import OrderBook, Order
+from orderbook import OrderBook, Order, Trade
 
 class Bittrex(OrderBook):
     key    = '15f7f668f7b548e08ebd7b50e8e1b544'
     secret = '7225f7821ff54835a963a445e9e2375c'
-    url    = 'https://api.bittrex.com'
+    url    = 'https://api.bittrex.com/v3'
 
     def __init__(self):
         super().__init__()
@@ -36,6 +36,15 @@ class Bittrex(OrderBook):
     async def on_exchange_deltas(self, msg):
         delta = self.process_message(msg[0])
         self.update_delta(delta)
+        r = self.get('/markets/ETH-BTC/trades', False)
+        self.update_trades(r.json())
+
+    def get(self, uri, is_signed, **params):
+        if is_signed:
+            ## TODO
+            raise NotImplemented
+        params = urllib.parse.urlencode(params)
+        return self.s.get(self.url + uri, params=params)
 
     def save(self):
         self.db.bittrex.insert_one(self.dump(ts=time.time()))
@@ -48,10 +57,12 @@ class Bittrex(OrderBook):
                 hub = self.conn.register_hub('c2')
                 self.conn.received += self.on_receive
                 hub.client.on('uE', self.on_exchange_deltas)
-                hub.server.invoke('SubscribeToExchangeDeltas', 'USD-BTC')
-                hub.server.invoke('QueryExchangeState', 'USD-BTC')
+                hub.server.invoke('SubscribeToExchangeDeltas', 'BTC-ETH')
+                hub.server.invoke('QueryExchangeState', 'BTC-ETH')
                 self.conn.start()
             except websockets.exceptions.ConnectionClosedOK:
+                pass
+            except websockets.exceptions.ConnectionClosedError:
                 pass
 
     def update_book(self, book):
@@ -61,6 +72,16 @@ class Bittrex(OrderBook):
         asks = book['S']
         for ask in asks:
             self.asks.add(Order(ask['R'], ask['Q']))
+
+    def update_trades(self, trades):
+        for trade in trades:
+            dotnet_ts = trade['executedAt']
+            if '.' not in dotnet_ts:
+                dotnet_ts = dotnet_ts.replace('Z', '.00Z')
+            ts = time.mktime(time.strptime(dotnet_ts, '%Y-%m-%dT%H:%M:%S.%fZ'))
+            price = trade['rate']
+            qnty = trade['quantity']
+            self.trades.append(Trade(ts, price, qnty))
 
     def update_delta(self, delta):
         if self.initial_nonce is None:
@@ -90,8 +111,10 @@ if __name__ == '__main__':
             pprint(b.bids)
             print('Asks:')
             pprint(b.asks)
-            if b.bids or b.asks:
-                b.save()
+            print('Trades:')
+            pprint(b.trades)
+            #if b.bids or b.asks or b.trades:
+            #    b.save()
     except KeyboardInterrupt:
         b.stop()
         print('\nquitting politely')

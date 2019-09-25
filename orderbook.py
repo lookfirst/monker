@@ -25,10 +25,43 @@ class Book(dict):
     def dump(self):
         return [ order.dump() for order in self.values() ]
 
+class Trade:
+    def __init__(self, ts, price, qnty):
+        self.ts = float(ts)
+        self.price = float(price)
+        self.qnty = float(qnty)
+    def __str__(self):
+        return repr(self)
+    def __repr__(self):
+        return f'Trade({self.ts:.6f}, {self.price:.2f}, {self.qnty})'
+    def dump(self):
+        return self.ts, self.price, self.qnty
+
+class Trades(list):
+    MAX = 10
+    def append(self, *items):
+        for item in items:
+            super().append(item)
+        if len(self) > self.MAX:
+            del self[0:-self.MAX]
+
+    def get_quote(self):
+        ## TODO come up with better method to get a quote of 
+        ##      trading price based on timestamp and quantity
+        ##      as well
+        return self[-1].price
+
+    def dump(self):
+        return [ trade.dump() for trade in self ]
+
 class OrderBook:
     def __init__(self):
         self.bids = Book()
         self.asks = Book()
+        self.trades = Trades()
+
+    def get_trading_quote(self):
+        return self.trades.get_quote()
 
     def _get_price_for(self, book, qnty):
         total_price = 0.0
@@ -42,6 +75,7 @@ class OrderBook:
     def flush(self):
         self.bids.clear()
         self.asks.clear()
+        self.trades.clear()
 
     def get_bid_for(self, qnty):
         return self._get_price_for(self.bids, qnty)
@@ -49,14 +83,19 @@ class OrderBook:
     def get_ask_for(self, qnty):
         return self._get_price_for(self.asks, qnty)
 
+    def update_trades(self, objs):
+        ## implement this on extended classes...
+        raise NotImplemented
+
     def update_book(self, objs):
         ## implement this on extended classes...
         raise NotImplemented
 
     def dump(self, **kargs):
         obj = {
-            'bids' : self.bids.dump(),
-            'asks' : self.asks.dump(),
+            'bids'   : self.bids.dump(),
+            'asks'   : self.asks.dump(),
+            'trades' : self.trades.dump(),
         }
         obj.update(kargs)
         return obj
