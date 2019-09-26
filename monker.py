@@ -21,6 +21,7 @@ BUDGET = 90.0             ## budget for market (zero for entire balance)
 ## internal state parameters
 BUY_QTY       = 90.0      ## every trade uses the same investiment
 BUY_TIMEOUT   = 5*60      ## max time it insists in buying an asset (sec)
+SELL_TIMEOUT  = 60*60     ## max time before it cancels sell order (sec)
 FEES          = 0.50      ## fees to buy/sell
 DTHR          = FEES*5    ## dip threshold for buy/sell (abs value)
 TICK_INTERVAL = '5m'      ## window size for market analysis
@@ -40,30 +41,33 @@ DFT_API_HDRS = {
 db_client = pymongo.MongoClient('mongodb://localhost:27017/')
 db        = db_client.monker
 
-def logbuy(orderid, price):
+def logbuy(buy_id, price):
     stdout.write('BUY: ')
     obj = {
         'time'    : datetime.now(),
-        'orderid' : orderid,
+        'buy_id'  : buy_id,
+        'sell_id' : '',
         'market'  : MRKT,
-        'price'   : price,
-        'status'  : 'NEW', ## [NEW, FILLED, PARTIALLY_FILLED, EXPIRED]
-        'isliqd'  : False, ## true when asset is sold (liquidated)
-        'target'  : 0.0,   ## zero while buy is not completed
-        'qty'     : 0.0,   ## zero while buy is not completed
+        'status'  : 'NEW',    ## [NEW, FILLED, PARTIALLY_FILLED, EXPIRED]
+        'price'   : price,    ## price payed for this asset (updated)
+        'target'  : 0.0,      ## target price for sale of this asset (updated)
+        'qty'     : BUY_QTY,  ## total bought on this order (updated)
     }
     if VERBOSE: print(obj)
     db.buy.insert_one(obj)
 
-def logsell(orderid, buy_orderid):
+def logsell(sell_id, buy_id, qty):
     stdout.write('SELL: ')
     obj = {
-        'time'        : datetime.now(),
-        'market'      : MRKT,
-        'orderid'     : orderid,
-        'buy_orderid' : buy_orderid, ## buy order id that it refers
-        'price'       : 0.0, ## zero while sell is not completed
-        'qty'         : 0.0, ## zero while sell is not completed
+        'time'    : datetime.now(),
+        'market'  : MRKT,
+        'sell_id' : sell_id,
+        'sell_id2': '',       ## id for next sale try (if any, updated)
+        'buy_id'  : buy_id,
+        'status'  : 'OPENED', ## [OPENED, CLOSED]
+        'price'   : 0.0,      ## final price for sold assets (updated)
+        'orig_qty': qty,      ## total for sale on this order
+        'qty'     : 0.0,      ## total sold on this order (updated)
     }
     if VERBOSE: print(obj)
     db.sell.insert_one(obj)
@@ -129,7 +133,7 @@ def delete(s, uri, is_signed, **params):
     params = urllib.parse.urlencode(params)
     return s.delete(URL + uri, params=params)
 
-def post_order(s, orderid, side, price, qty):
+def post_order(s, side, id, price, qty):
     return post(s, '/api/v3/order', True,
                 symbol=MRKT,
                 side=side,
@@ -139,21 +143,22 @@ def post_order(s, orderid, side, price, qty):
                 quantity=qty,
                 price=price,
                 recvWindow=5000,
-                newClientOrderId=orderid)
+                newClientOrderId=id)
 
 def get_open_orders(s):
     return get(s, '/api/v3/openOrders', True,
                symbol=MRKT).json()
 
-def get_order(s, orderid):
+def get_order(s, id):
+    ## TODO should return None if order not found
     return get(s, '/api/v3/order', True,
                symbol=MRKT,
-               origClientOrderId=orderid).json()
+               origClientOrderId=id).json()
 
-def delete_order(s, orderid)
+def delete_order(s, id)
     return delete(s, '/api/v3/order', True,
                   symbol=MRKT,
-                  origClientOrderId=orderid)
+                  origClientOrderId=id)
 
 def get_accm_diff(s):
     return -3.0
@@ -163,98 +168,104 @@ def get_mrkt_info(s):
     ## liquidity = budget - exps
     return 0.5, 80.0, 100
 
-def buy_thread(stop_event):
+interval_cnter = 0
+def is_interval_edge(period):
+    global interval_cnter
+    isedge = True if interval_cnter % period == 0 else False
+    interval_cnter += 1
+    return isedge
+
+def thread_entry(stop_event):
     try:
         loginfo('buy thread started')
         s = requests.Session()
         s.headers.update(DFT_API_HDRS)
         while not stop_event.is_set():
-            time.sleep(10)
+            time.sleep(1)
+            if not is_interval_edge(30):
+                continue
             dip = get_accm_diff(s)
             exps, blnc, price = get_mrkt_info(s)
             lqdy = BUDGET - exps
             logstate(dip, exps, blnc, lqdy, price)
+            ## monitor price dips and issue buy orders
             if dip < (-DTHR):
                 if lqdy < BUY_QTY:
                     logwarn('not enough liquidity')
                 if blnc < lqdy:
                     logwarn('not enough balance')
                 else:
-                    orderid = str(uuid.uuid4())
-                    post_order(s, orderid, 'BUY', price, BUY_QTY)
-                    logbuy(orderid, price)
+                    buy_id = str(uuid.uuid4())
+                    post_order(s, 'BUY', buy_id, price, BUY_QTY)
+                    logbuy(buy_id, price)
+            ## update buy db entries when orders are completed
             for buy in db.buy.find({'status':'NEW'}):
-                orderid = buy['orderid']
-                r = get_order(s, orderid)
+                buy_id = buy['buy_id']
+                r = get_order(s, buy_id)
                 executedQty         = float(r['executedQty'])
                 cummulativeQuoteQty = float(r['cummulativeQuoteQty'])
-                new_price           = cummulativeQuoteQty/executedQty
+                age_in_seconds      = (datetime.now() - buy['time']).seconds
                 if r['status'] == 'FILLED':
+                    sell_id = str(uuid.uuid4())
                     upd_fields = {
                         'status' : 'FILLED',
-                        'price'  : new_price,
-                        'target' : new_price+DTHR,
+                        'sell_id': sell_id,
+                        'price'  : cummulativeQuoteQty/executedQty,
+                        'target' : cummulativeQuoteQty/executedQty+DTHR,
                         'qty'    : executedQty,
                     }
-                    db.buy.update({'orderid' : orderid}, {"$set": upd_fields})
-                else:
-                    age = datetime.now() - buy['time']
-                    if age.seconds > BUY_TIMEOUT:
-                        if executedQty > 0.0:
-                            upd_fields = {
-                                'status' : 'PARTIALLY_FILLED',
-                                'price'  : new_price,
-                                'qty'    : executedQty,
-                            }
-                        else:
-                            upd_fields = {
-                                'status' : 'EXPIRED',
-                                'isliqd' : True, ## makes filter easier to sell
-                            }
-                        db.buy.update({'orderid' : orderid}, {"$set": upd_fields})
-    except Exception:
-        logerror(exc())
-
-## TODO join the two threads and remove is liqudated flag...
-
-def sell_thread(stop_event):
-    try:
-        loginfo('sell thread started')
-        s = requests.Session()
-        s.headers.update(DFT_API_HDRS)
-        while not stop_event.is_set():
-            time.sleep(10)
-            exps, blnc, price = get_mrkt_info(s)
-            for buy in db.buy.find({'isliqd':False}):
-                target = buy['target']
-                if price > target:
-                    buy_orderid = buy['orderid']
-                    sell = db.sell.find_one({'buy_orderid':buy_orderid})
-                    if sell is not None:
-                        orderid = sell['orderid']
-                        r = get_order(s, orderid)
-                        ## a db entry exists and an order was issued already
-                        ## check status of the order and update db, maybe issue
-                        ## order again or cancel it..
-                        ## db.sell.update({'orderid' : orderid}, {"$set": upd_fields})
-                        ## in case sell succeed update isliqd on buy table...
-                        ## db.buy.update({'orderid' : buy_orderid}, {"$set": {'isliqd':True}})
+                    logsell(sell_id, buy_id, executedQty)
+                    db.buy.update({'buy_id' : buy_id}, {"$set": upd_fields})
+                elif age_in_seconds > BUY_TIMEOUT:
+                    if executedQty > 0.0:
+                        sell_id = str(uuid.uuid4())
+                        upd_fields = {
+                            'status' : 'PARTIALLY_FILLED',
+                            'sell_id': sell_id,
+                            'price'  : cummulativeQuoteQty/executedQty,
+                            'qty'    : executedQty,
+                        }
+                        logsell(sell_id, buy_id, executedQty)
                     else:
-                        orderid = str(uuid.uuid4())
-                        post_order(s, orderid, 'SELL', target, buy['qty'])
-                        logsell(orderid, buy_orderid)
+                        upd_fields = { 'status' : 'EXPIRED', }
+                    db.buy.update({'buy_id' : buy_id}, {"$set": upd_fields})
+            ## post/delete sell orders and update db entries when completed
+            for sell in db.sell.find({'status':'OPENED'}):
+                sell_id, buy_id = sell['sell_id'], sell['buy_id']
+                buy = db.buy.find_one({'buy_id': buy_id})
+                target = buy['target']
+                r = get_order(s, sell_id)
+                if r is None and price > target:
+                    post_order(s, 'SELL', sell_id, target, sell['orig_qty'])
+                elif r is not None:
+                    executedQty         = float(r['executedQty'])
+                    cummulativeQuoteQty = float(r['cummulativeQuoteQty'])
+                    age_in_seconds      = (datetime.now() - sell['time']).seconds
+                    if r['status'] == 'FILLED':
+                        upd_fields = {
+                            'status' : 'CLOSED',
+                            'price'  : cummulativeQuoteQty/executedQty,
+                            'qty'    : executedQty,
+                        }
+                        db.sell.update({'sell_id' : sell_id}, {"$set": upd_fields})
+                    elif age_in_seconds > SELL_TIMEOUT:
+                        delete(s, sell_id)
+                        sell_id2 = str(uuid.uuid4())
+                        upd_fields = {
+                            'status'   : 'CLOSED',
+                            'sell_id2' : sell_id2,
+                            'price'    : cummulativeQuoteQty/executedQty if executedQty > 0.0 else 0.0,
+                            'qty'      : executedQty,
+                        }
+                        db.sell.update({'sell_id' : sell_id}, {"$set": upd_fields})
+                        open_qty = sell['orig_qty'] - sell['qty']
+                        logsell(sell_id2, buy_id, open_qty)
     except Exception:
         logerror(exc())
 
-def start_buy_thread():
+def start_thread():
     stop_event = threading.Event()
-    thread = threading.Thread(target=buy_thread, args=(stop_event,))
-    thread.start()
-    return thread, stop_event
-
-def start_sell_thread():
-    stop_event = threading.Event()
-    thread = threading.Thread(target=buy_thread, args=(stop_event,))
+    thread = threading.Thread(target=thread_entry, args=(stop_event,))
     thread.start()
     return thread, stop_event
 
@@ -268,24 +279,18 @@ if __name__ == '__main__':
     __debug__()
     loginfo('monker main started')
     try:
-        buy_th, buy_stop_ev   = start_buy_thread()
-        sell_th, sell_stop_ev = start_sell_thread()
+        t, stop = start_buy_thread()
         while True:
             time.sleep(1)
-            if not buy_th.is_alive():
-                logerror('buy thread died')
-                break
-            if not sell_th.is_alive():
-                logerror('sell thread died')
+            if not t.is_alive():
+                logerror('thread died')
                 break
     except KeyboardInterrupt:
         loginfo('ctrl-c pressed')
     except Exception:
         logerror(exc())
     finally:
-        buy_stop_ev.set()
-        sell_stop_ev.set()
-        buy_th.join()
-        sell_th.join()
+        stop.set()
+        t.join()
     loginfo('monker main terminated')
 
