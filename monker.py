@@ -1,5 +1,5 @@
-import requests, hashlib, hmac, time, base64
-import json, urllib, pymongo, threading, uuid
+import requests, hashlib, hmac, time
+import urllib, pymongo, threading, uuid
 
 from traceback import format_exc as exc
 from pdb import set_trace as trace
@@ -38,8 +38,8 @@ DFT_API_HDRS = {
 }
 
 ## global variables
-db_client = pymongo.MongoClient('mongodb://localhost:27017/')
-db        = db_client.monker
+DB_CLIENT = pymongo.MongoClient('mongodb://localhost:27017/')
+DB        = DB_CLIENT.monker
 
 def logbuy(buy_id, price):
     stdout.write('BUY: ')
@@ -54,7 +54,7 @@ def logbuy(buy_id, price):
         'qty'     : BUY_QTY,        ## total quantity purchased (updated later)
     }
     if VERBOSE: print(obj)
-    db.buy.insert_one(obj)
+    DB.buy.insert_one(obj)
 
 def logsell(sell_id, buy_id, qty):
     stdout.write('SELL: ')
@@ -70,7 +70,7 @@ def logsell(sell_id, buy_id, qty):
         'qty'     : 0.0,            ## total quantity sold (updated later)
     }
     if VERBOSE: print(obj)
-    db.sell.insert_one(obj)
+    DB.sell.insert_one(obj)
 
 def logstate(dip, exps, blnc, lqdy, price):
     stdout.write('STATE: ')
@@ -85,7 +85,7 @@ def logstate(dip, exps, blnc, lqdy, price):
         'price'  : price,
     }
     if VERBOSE: print(obj)
-    db.dip.insert_one(obj)
+    DB.dip.insert_one(obj)
 
 def logtext(level, text):
     stdout.write('LOGGING: ')
@@ -96,7 +96,7 @@ def logtext(level, text):
         'text'   : text,
     }
     if VERBOSE: print(obj)
-    db.logging.insert_one(obj)
+    DB.logging.insert_one(obj)
 
 def loginfo(text):
     logtext('info', text)
@@ -155,7 +155,7 @@ def get_order(s, id):
                symbol=MRKT,
                origClientOrderId=id).json()
 
-def delete_order(s, id)
+def delete_order(s, id):
     return delete(s, '/api/v3/order', True,
                   symbol=MRKT,
                   origClientOrderId=id)
@@ -172,7 +172,7 @@ interval_cnter = 0
 def is_interval_edge(period):
     global interval_cnter
     isedge = interval_cnter == 0
-    interval_cnter = (interval_cnter+1) % 60
+    interval_cnter = (interval_cnter+1) % period
     return isedge
 
 def thread_entry(stop_event):
@@ -198,7 +198,7 @@ def thread_entry(stop_event):
                     buy_id = str(uuid.uuid4())
                     logbuy(buy_id, price)
             ## post/delete buy orders and update buy db entries when completed
-            for buy in db.buy.find({'status':'OPENED'}):
+            for buy in DB.buy.find({'status':'OPENED'}):
                 buy_id = buy['buy_id']
                 r = get_order(s, buy_id)
                 if r is None:
@@ -216,9 +216,10 @@ def thread_entry(stop_event):
                             'target' : cummulativeQuoteQty/executedQty+DTHR,
                             'qty'    : executedQty,
                         }
-                        db.buy.update({'buy_id' : buy_id}, {"$set": upd_fields})
+                        DB.buy.update({'buy_id' : buy_id}, {"$set": upd_fields})
                         logsell(sell_id, buy_id, executedQty)
                     elif age_in_seconds > BUY_TIMEOUT:
+                        sell_id = str(uuid.uuid4())
                         delete_order(s, buy_id)
                         if executedQty > 0.0:
                             sell_id = str(uuid.uuid4())
@@ -231,11 +232,11 @@ def thread_entry(stop_event):
                             logsell(sell_id, buy_id, executedQty)
                         else:
                             upd_fields = { 'status' : 'CLOSED', }
-                        db.buy.update({'buy_id' : buy_id}, {"$set": upd_fields})
+                        DB.buy.update({'buy_id' : buy_id}, {"$set": upd_fields})
             ## post/delete sell orders and update sell db entries when completed
-            for sell in db.sell.find({'status':'OPENED'}):
+            for sell in DB.sell.find({'status':'OPENED'}):
                 sell_id, buy_id = sell['sell_id'], sell['buy_id']
-                buy = db.buy.find_one({'buy_id': buy_id})
+                buy = DB.buy.find_one({'buy_id': buy_id})
                 target = buy['target']
                 r = get_order(s, sell_id)
                 if r is None and price > target:
@@ -250,7 +251,7 @@ def thread_entry(stop_event):
                             'price'  : cummulativeQuoteQty/executedQty,
                             'qty'    : executedQty,
                         }
-                        db.sell.update({'sell_id' : sell_id}, {"$set": upd_fields})
+                        DB.sell.update({'sell_id' : sell_id}, {"$set": upd_fields})
                     elif age_in_seconds > SELL_TIMEOUT:
                         delete_order(s, sell_id)
                         sell_id2 = str(uuid.uuid4())
@@ -260,7 +261,7 @@ def thread_entry(stop_event):
                             'price'    : cummulativeQuoteQty/executedQty if executedQty > 0.0 else 0.0,
                             'qty'      : executedQty,
                         }
-                        db.sell.update({'sell_id' : sell_id}, {"$set": upd_fields})
+                        DB.sell.update({'sell_id' : sell_id}, {"$set": upd_fields})
                         open_qty = sell['orig_qty'] - sell['qty']
                         logsell(sell_id2, buy_id, open_qty)
     except Exception:
@@ -274,17 +275,17 @@ def start_thread():
     thread.start()
     return thread, stop_event
 
-def __debug__():
+def debug():
     s = requests.Session()
     s.headers.update(DFT_API_HDRS)
     #post_order(s, 160, 1)
     exit(0)
 
 if __name__ == '__main__':
-    __debug__()
+    debug()
     loginfo('monker main started')
     try:
-        t, stop = start_buy_thread()
+        t, stop = start_thread()
         while True:
             time.sleep(1)
             if not t.is_alive():
