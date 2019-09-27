@@ -1,5 +1,6 @@
 import requests, hashlib, hmac, time
 import urllib, pymongo, threading, uuid
+import argparse, fcntl
 
 from traceback import format_exc as exc
 from pdb import set_trace as trace
@@ -13,8 +14,8 @@ VERBOSE = True
 ##       can be a very good indicative of the market mood (TBC)
 
 ## market definition
-MRKT_PAIR = None          ## tuple with pair asset,market (command line argument)
-MRKT      = ''            ## market to trade on (joined market pair)
+ASTMKT = None          ## tuple with pair asset,market (command line argument)
+SYMBOL = ''            ## market to trade on (joined asset,market pair)
 
 ## binance keys and url
 KEY    = 'ZADfFZTF0Djk5HozzmbbPhK1TWqz9SROYaivOcQPbJPIEscP24Rhc8RzMGx7pvdz'
@@ -26,16 +27,25 @@ DFT_API_HDRS = {
     'X-MBX-APIKEY' : KEY,
 }
 
+## metadata and thread names 
+MAESTRO   = 'maestro'
+DIPSEEKER = 'dipseeker'
+BUYER     = 'buyer'
+SELLER    = 'seller'
+
 ## global variables
 DB_CLIENT = pymongo.MongoClient('mongodb://localhost:27017/')
 DB        = DB_CLIENT.monker
+
+class MetaNotFound   (Exception): pass
+class FileLockFailed (Exception): pass
 
 def logbuy(buy_id, price, qty, proft):
     stdout.write('BUY: ')
     obj = {
         'open_time' : datetime.now(), ## open time
         'close_time': '',             ## close time (updated later)
-        'market'    : MRKT,           ## market name
+        'symbol'    : SYMBOL,         ## symbol name
         'buy_id'    : buy_id,         ## exchange order buy id 
         'sell_id'   : '',             ## exchange order sell id
         'status'    : 'OPENED',       ## [OPENED, CLOSED]
@@ -53,7 +63,7 @@ def logsell(sell_id, buy_id, price, qty):
     obj = {
         'open_time' : datetime.now(), ## open time
         'close_time': '',             ## close time (updated later)
-        'market'    : MRKT,           ## market name
+        'symbol'    : SYMBOL,         ## symbol name
         'buy_id'    : buy_id,         ## exchange order buy id
         'sell_id'   : sell_id,        ## exchange order sell id
         'sell_id2'  : '',             ## next try sell id (if any, updated later)
@@ -70,7 +80,7 @@ def logstate(dthr, dip, exps, blnc, lqdy, price):
     stdout.write('STATE: ')
     obj = {
         'time'   : datetime.now(),
-        'market' : MRKT,
+        'symbol' : SYMBOL,
         'dthr'   : dthr,
         'dip'    : dip,
         'exps'   : exps,
@@ -85,7 +95,7 @@ def logtext(level, text):
     stdout.write('LOGGING: ')
     obj = {
         'time'   : datetime.now(),
-        'market' : MRKT,
+        'symbol' : SYMBOL,
         'level'  : level,
         'text'   : text,
     }
@@ -129,7 +139,7 @@ def delete(s, uri, is_signed, **params):
 
 def post_order(s, side, id, price, qty):
     return post(s, '/api/v3/order', True,
-                symbol=MRKT,
+                symbol=SYMBOL,
                 side=side,
                 type='LIMIT',
                 timeInForce='GTC',
@@ -141,17 +151,17 @@ def post_order(s, side, id, price, qty):
 
 def get_open_orders(s):
     return get(s, '/api/v3/openOrders', True,
-               symbol=MRKT).json()
+               symbol=SYMBOL).json()
 
 def get_order(s, id):
     ## TODO should return None if order not found
     return get(s, '/api/v3/order', True,
-               symbol=MRKT,
+               symbol=SYMBOL,
                origClientOrderId=id).json()
 
 def delete_order(s, id):
     return delete(s, '/api/v3/order', True,
-                  symbol=MRKT,
+                  symbol=SYMBOL,
                   origClientOrderId=id)
 
 def get_accm_diff(s):
@@ -170,8 +180,36 @@ def get_asset_price(s):
     ## TODO
     return 4
 
+def maestro(s):
+    M = DB.meta.find_one({'symbol': SYMBOL, 'name': DIPSEEKER})
+    if M is None:
+        dipseeker = {
+            'symbol'        : SYMBOL,
+            'name'          : DIPSEEKER,
+            'TICK_INTERVAL' : '5m',
+            'BUDGET'        : 90.0,
+            'DTHR'          : 0.5*5,
+            'BUY_QTY'       : 0.1,
+        }
+    M = DB.meta.find_one({'symbol': SYMBOL, 'name': BUYER})
+    if M is None:
+        buyer = {
+            'symbol'        : SYMBOL,
+            'name'          : BUYER,
+            'BUY_TIMEOUT'   : 5*60,
+        }
+    M = DB.meta.find_one({'symbol': SYMBOL, 'name': SELLER})
+    if M is None:
+        seller = {
+            'symbol'        : SYMBOL,
+            'name'          : SELLER,
+            'SELL_TIMEOUT'  : 60*60,
+        }
+    ## TODO: add logic to change params 'on the fly'
+
 def dipseeker(s):
-    M = DB.meta.find_one({'name':'DIPSEEKER'})
+    M = DB.meta.find_one({'symbol': SYMBOL, 'name': DIPSEEKER})
+    if M is None: raise MetaNotFound
     dip = get_accm_diff(s, M['TICK_INTERVAL'])
     cur_exps, cur_blnc = get_mrkt_info(s)
     cur_price = get_asset_price(s)
@@ -186,8 +224,9 @@ def dipseeker(s):
             logbuy(str(uuid.uuid4()), cur_price, M['BUY_QTY'], M['DTHR'])
 
 def buyer(s):
-    M = DB.meta.find_one({'name':'BUYER'})
-    for buy in DB.buy.find({'status':'OPENED'}):
+    M = DB.meta.find_one({'symbol': SYMBOL, 'name': BUYER})
+    if M is None: raise MetaNotFound
+    for buy in DB.buy.find({'symbol': SYMBOL, 'status':'OPENED'}):
         buy_id = buy['buy_id']
         r = get_order(s, buy_id)
         if r is None:
@@ -230,8 +269,10 @@ def buyer(s):
                 DB.buy.update({'buy_id' : buy_id}, {"$set": upd_fields})
 
 def seller(s):
-    M = DB.meta.find_one({'name':'SELLER'})
-    for sell in DB.sell.find({'status':'OPENED'}):
+    ## read metadate from DB
+    M = DB.meta.find_one({'symbol': SYMBOL, 'name': SELLER})
+    if M is None: raise MetaNotFound
+    for sell in DB.sell.find({'symbol': SYMBOL, 'status':'OPENED'}):
         sell_id, buy_id = sell['sell_id'], sell['buy_id']
         r = get_order(s, sell_id)
         cur_price = get_asset_price(s)
@@ -270,12 +311,15 @@ def thread_entry(stop_event, name, period):
         s = requests.Session()
         s.headers.update(DFT_API_HDRS)
         while not stop_event.is_set():
+            ## ensure thread period is respected
             time.sleep(1)
             cnter = (cnter + 1) % period
             if cnter != 0: continue
-            if   name == 'DIPSEEKER': dipseeker(s)
-            elif name == 'BUYER':     buyer(s)
-            elif name == 'SELLER':    seller(s)
+            ## call appropriated function
+            if   name == MAESTRO:   maestro(s)
+            elif name == DIPSEEKER: dipseeker(s)
+            elif name == BUYER:     buyer(s)
+            elif name == SELLER:    seller(s)
             else: raise NotImplemented
     except Exception:
         logerror(exc())
@@ -283,10 +327,12 @@ def thread_entry(stop_event, name, period):
         loginfo(f'thread {name} ended')
 
 def start_thread(name, period):
+    lockfp = lock(f'{SYMBOL.lower()}.{name}')
     stop_event = threading.Event()
-    thread = threading.Thread(target=thread_entry, args=(stop_event, name, period))
+    thread = threading.Thread(target=thread_entry,
+                              args=(stop_event, name, period))
     thread.start()
-    return thread, stop_event
+    return thread, stop_event, name, lockfp
 
 def debug():
     s = requests.Session()
@@ -294,27 +340,62 @@ def debug():
     #post_order(s, 160, 1)
     exit(0)
 
+def lock(name):
+    lockfile = f'/var/lock/monker.{name}'
+    loginfo(f'locking file {lockfile}')
+    fp = open(lockfile, 'w')
+    fp.flush()
+    try:
+        fcntl.lockf(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except IOError:
+        logerror(f"locked file {lockfile}")
+        raise FileLockFailed 
+    return fp
+
+def unlock(fp):
+    fcntl.lockf(fp, fcntl.LOCK_UN)
+    fp.close()
+
 if __name__ == '__main__':
     debug()
+    ## parse command line arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument("asset",  help="asset to buy/sell")
+    parser.add_argument("market", help="market to trade on")
+    parser.add_argument("--nomaestro", action='store_true',
+                        help="disables maestro thread")
+    parser.add_argument("--nodipseeker", action='store_true',
+                        help="disables dip seeker thread")
+    parser.add_argument("--nobuyer", action='store_true',
+                        help="disables buyer thread")
+    parser.add_argument("--noseller", action='store_true',
+                        help="disables seller thread")
+    ## parse asset/market and build symbol name
+    ASTMKT = parser.asset.upper(), parser.market.upper()
+    SYMBOL = (parser.asset + parser.market).upper()
+    ## starts the enabled threads
     loginfo('thread main started')
     try:
         threads = []
-        if len(argv) != 3:
-            stderr.write(f'USAGE: {argv[0]} <ASSET> <MARKET>\n')
-            exit(1)
-        MRKT_PAIR = (argv[0].upper(), argv[1].upper())
-        MRKT      = (argv[0] + argv[1]).upper()
-        threads.append(start_thread('DIPSEEKER', 30))
-        threads.append(start_thread('BUYER',     30))
-        threads.append(start_thread('SELLER',    30))
-        while True: time.sleep(1)
+        if not parser.nomaestro:   threads.append(start_thread(MAESTRO,   30))
+        time.sleep(1) ## ensures maestro can create meta collection first
+        if not parser.nodipseeker: threads.append(start_thread(DIPSEEKER, 30))
+        if not parser.nobuyer:     threads.append(start_thread(BUYER,     30))
+        if not parser.noseller:    threads.append(start_thread(SELLER,    30))
+        while True:
+            time.sleep(1)
+            for thread, stop, name, lockfp in threads:
+                if not thread.is_alive():
+                    logerror('thread {name} died')
+                    break
     except KeyboardInterrupt:
         loginfo('ctrl-c pressed')
     except Exception:
         logerror(exc())
     finally:
-        for thread, stop in threads:
+        for thread, stop, name, lockfp in threads:
             stop.set()
             thread.join()
+            unlock(lockfp)
     loginfo('thread main ended')
 
