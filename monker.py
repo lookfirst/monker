@@ -3,15 +3,16 @@ import urllib, pymongo, threading, uuid
 import argparse, fcntl
 
 from traceback import format_exc as exc
-from pdb import set_trace as trace
 from datetime import datetime
 from sys import stdout
 
 ## print more output to the terminal
 VERBOSE = True
 
-## NOTE: the time difference between open/close of sell entries
-##       can be a very good indicative of the market mood (TBC)
+try:
+    from IPython import embed as trace
+except ImportError:
+    from pdb import set_trace as trace
 
 ## market definition
 ASTMKT = None          ## tuple with pair asset,market (command line argument)
@@ -39,6 +40,7 @@ DB        = DB_CLIENT.monker
 
 class MetaNotFound   (Exception): pass
 class FileLockFailed (Exception): pass
+class BadAPIResponse (Exception): pass
 
 def logbuy(buy_id, price, qty, proft):
     stdout.write('BUY: ')
@@ -116,26 +118,27 @@ def sign(**params):
     m = hmac.new(SECRET.encode(), q.encode(), hashlib.sha256)
     return m.hexdigest()
 
-def get(s, uri, is_signed, **params):
+def api(method, uri, is_signed, **params):
     if is_signed:
         params['timestamp'] = int(time.time() * 1000)
         params['signature'] = sign(**params)
     params = urllib.parse.urlencode(params)
-    return s.get(URL + uri, params=params)
+    r = method(URL + uri, params=params)
+    obj = r.json()
+    if r.status_code >= 500:
+        raise BadAPIResponse(f'server ({r.status_code}, {obj["code"]}): {obj["msg"]}')
+    elif r.status_code >= 400:
+        raise BadAPIResponse(f'bad req ({r.status_code}, {obj["code"]}): {obj["msg"]}')
+    return obj
+
+def get(s, uri, is_signed, **params):
+    return api(s.get, uri, is_signed, **params)
 
 def post(s, uri, is_signed, **params):
-    if is_signed:
-        params['timestamp'] = int(time.time() * 1000)
-        params['signature'] = sign(**params)
-    params = urllib.parse.urlencode(params)
-    return s.post(URL + uri, params=params)
+    return api(s.post, uri, is_signed, **params)
 
 def delete(s, uri, is_signed, **params):
-    if is_signed:
-        params['timestamp'] = int(time.time() * 1000)
-        params['signature'] = sign(**params)
-    params = urllib.parse.urlencode(params)
-    return s.delete(URL + uri, params=params)
+    return api(s.delete, uri, is_signed, **params)
 
 def post_order(s, side, id, price, qty):
     return post(s, '/api/v3/order', True,
@@ -151,13 +154,15 @@ def post_order(s, side, id, price, qty):
 
 def get_open_orders(s):
     return get(s, '/api/v3/openOrders', True,
-               symbol=SYMBOL).json()
+               symbol=SYMBOL)
 
 def get_order(s, id):
-    ## TODO should return None if order not found
-    return get(s, '/api/v3/order', True,
-               symbol=SYMBOL,
-               origClientOrderId=id).json()
+    try:
+        return get(s, '/api/v3/order', True,
+                   symbol=SYMBOL,
+                   origClientOrderId=id)
+    except BadAPIResponse:
+        return None
 
 def delete_order(s, id):
     return delete(s, '/api/v3/order', True,
@@ -181,6 +186,9 @@ def get_asset_price(s):
     return 4
 
 def maestro(s):
+    ## TODO: add logic to change params 'on the fly'
+    ## NOTE: the time difference between open/close of sell entries
+    ##       can be a very good indicative of the market mood (TBC)
     M = DB.meta.find_one({'symbol': SYMBOL, 'name': DIPSEEKER})
     if M is None:
         dipseeker = {
@@ -205,7 +213,6 @@ def maestro(s):
             'name'          : SELLER,
             'SELL_TIMEOUT'  : 60*60,
         }
-    ## TODO: add logic to change params 'on the fly'
 
 def dipseeker(s):
     M = DB.meta.find_one({'symbol': SYMBOL, 'name': DIPSEEKER})
@@ -337,6 +344,8 @@ def start_thread(name, period):
 def debug():
     s = requests.Session()
     s.headers.update(DFT_API_HDRS)
+    r = get_order(s, '056aea28-7770-4815-8011-4aef6b537596')
+    trace()
     #post_order(s, 160, 1)
     exit(0)
 
@@ -348,7 +357,6 @@ def lock(name):
     try:
         fcntl.lockf(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except IOError:
-        logerror(f"locked file {lockfile}")
         raise FileLockFailed 
     return fp
 
@@ -356,9 +364,7 @@ def unlock(fp):
     fcntl.lockf(fp, fcntl.LOCK_UN)
     fp.close()
 
-if __name__ == '__main__':
-    debug()
-    ## parse command line arguments
+def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("asset",  help="asset to buy/sell")
     parser.add_argument("market", help="market to trade on")
@@ -370,18 +376,25 @@ if __name__ == '__main__':
                         help="disables buyer thread")
     parser.add_argument("--noseller", action='store_true',
                         help="disables seller thread")
+    return parser.parse_args()
+
+if __name__ == '__main__':
+    args = parse_args()
     ## parse asset/market and build symbol name
-    ASTMKT = parser.asset.upper(), parser.market.upper()
-    SYMBOL = (parser.asset + parser.market).upper()
+    ASTMKT = args.asset.upper(), args.market.upper()
+    SYMBOL = (args.asset + args.market).upper()
+    ## TODO check if symbol is available
+    ## TODO check if server is responding
+    debug()
     ## starts the enabled threads
     loginfo('thread main started')
     try:
         threads = []
-        if not parser.nomaestro:   threads.append(start_thread(MAESTRO,   30))
+        if not args.nomaestro:   threads.append(start_thread(MAESTRO,   30))
         time.sleep(1) ## ensures maestro can create meta collection first
-        if not parser.nodipseeker: threads.append(start_thread(DIPSEEKER, 30))
-        if not parser.nobuyer:     threads.append(start_thread(BUYER,     30))
-        if not parser.noseller:    threads.append(start_thread(SELLER,    30))
+        if not args.nodipseeker: threads.append(start_thread(DIPSEEKER, 30))
+        if not args.nobuyer:     threads.append(start_thread(BUYER,     30))
+        if not args.noseller:    threads.append(start_thread(SELLER,    30))
         while True:
             time.sleep(1)
             for thread, stop, name, lockfp in threads:
