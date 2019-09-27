@@ -28,6 +28,21 @@ DFT_API_HDRS = {
     'X-MBX-APIKEY' : KEY,
 }
 
+KLINES_LABELS = [
+    'open_time',
+    'open',
+    'high',
+    'low',
+    'close',
+    'volume',
+    'close_time',
+    'quote_volume',
+    'n_of_trades',
+    'taker_base_volume',
+    'taker_quote_volume',
+    'ignore',
+]
+
 ## metadata and thread names 
 MAESTRO   = 'maestro'
 DIPSEEKER = 'dipseeker'
@@ -41,6 +56,7 @@ DB        = DB_CLIENT.monker
 class MetaNotFound   (Exception): pass
 class FileLockFailed (Exception): pass
 class BadAPIResponse (Exception): pass
+class MarketNotFound (Exception): pass
 
 def logbuy(buy_id, price, qty, proft):
     stdout.write('BUY: ')
@@ -126,9 +142,11 @@ def api(method, uri, is_signed, **params):
     r = method(URL + uri, params=params)
     obj = r.json()
     if r.status_code >= 500:
-        raise BadAPIResponse(f'server ({r.status_code}, {obj["code"]}): {obj["msg"]}')
+        text = f'server error ({r.status_code}, {obj["code"]}): {obj["msg"]}'
+        raise BadAPIResponse(text)
     elif r.status_code >= 400:
-        raise BadAPIResponse(f'bad req ({r.status_code}, {obj["code"]}): {obj["msg"]}')
+        text = f'bad request ({r.status_code}, {obj["code"]}): {obj["msg"]}'
+        raise BadAPIResponse(text)
     return obj
 
 def get(s, uri, is_signed, **params):
@@ -169,21 +187,51 @@ def delete_order(s, id):
                   symbol=SYMBOL,
                   origClientOrderId=id)
 
-def get_accm_diff(s):
-    ## TODO
-    return -3.0
+def get_klines(s, interval, limit):
+    r = get(s, '/api/v1/klines', False,
+            symbol=SYMBOL,
+            interval=interval,
+            limit=limit)
+    klines = []
+    for kline_values in r:
+        kline_values = [float(v) for v in kline_values]
+        klines.append(dict(zip(KLINES_LABELS, kline_values)))
+    return klines
 
 def get_mrkt_info(s):
-    ## TODO
-    ## exps is total amount of assets
-    ## blnc is total amount of tusd 
-    ## returns mrkt (exps, blnc)
-    ## liquidity = budget - exps
-    return 0.5, 80.0
+    r = get(s, '/api/v3/account', True)
+    asset, market = ASTMKT
+    exps, blnc = {}, {}
+    for balance in r['balances']:
+        if balance['asset'] == asset:
+            exps['free'  ] = float(balance['free'])
+            exps['locked'] = float(balance['locked'])
+            exps['total' ] = exps['free'] + exps['locked']
+        if balance['asset'] == market:
+            blnc['free'  ] = float(balance['free'])
+            blnc['locked'] = float(balance['locked'])
+            blnc['total' ] = blnc['free'] + blnc['locked']
+        if exps and blnc:
+            break
+    else:
+        raise MarketNotFound
+    return exps, blnc
 
 def get_asset_price(s):
-    ## TODO
-    return 4
+    obj = get(s, '/api/v3/avgPrice', False, symbol=SYMBOL)
+    return float(obj['price'])
+
+def calculate_metric(s, interval, limit):
+    klines = get_klines(s, interval, limit)
+    diff = 0.0
+    for i in range(0, limit-1):
+        diff += (klines[i]['close'] - klines[i+1]['close'])
+    return diff
+
+def debug():
+    #s = requests.Session()
+    #s.headers.update(DFT_API_HDRS)
+    exit(0)
 
 def maestro(s):
     ## TODO: add logic to change params 'on the fly'
@@ -194,7 +242,8 @@ def maestro(s):
         dipseeker = {
             'symbol'        : SYMBOL,
             'name'          : DIPSEEKER,
-            'TICK_INTERVAL' : '5m',
+            'INTERVAL'      : '5m',
+            'LIMIT'         : 5,
             'BUDGET'        : 90.0,
             'DTHR'          : 0.5*5,
             'BUY_QTY'       : 0.1,
@@ -217,18 +266,20 @@ def maestro(s):
 def dipseeker(s):
     M = DB.meta.find_one({'symbol': SYMBOL, 'name': DIPSEEKER})
     if M is None: raise MetaNotFound
-    dip = get_accm_diff(s, M['TICK_INTERVAL'])
-    cur_exps, cur_blnc = get_mrkt_info(s)
-    cur_price = get_asset_price(s)
-    lqdy = M['BUDGET'] - cur_exps
-    logstate(M['DTHR'], dip, cur_exps, cur_blnc, lqdy, cur_price)
+    dip = get_accm_diff(s, M['INTERVAL'], M['LIMIT'])
+    exps, blnc = get_mrkt_info(s)
+    price = get_asset_price(s)
+    lqdy = M['BUDGET'] - exps['total']
+    logstate(M['DTHR'], dip, exps['total'], blnc['total'], lqdy, price)
     if dip < (-M['DTHR']):
         if lqdy < M['BUY_QTY']:
             logwarn('not enough liquidity')
-        if cur_blnc < lqdy:
+        elif blnc['total'] < lqdy:
             logwarn('not enough balance')
+        elif blnc['free'] < lqdy:
+            logwarn('not enough free balance')
         else:
-            logbuy(str(uuid.uuid4()), cur_price, M['BUY_QTY'], M['DTHR'])
+            logbuy(str(uuid.uuid4()), price, M['BUY_QTY'], M['DTHR'])
 
 def buyer(s):
     M = DB.meta.find_one({'symbol': SYMBOL, 'name': BUYER})
@@ -282,8 +333,8 @@ def seller(s):
     for sell in DB.sell.find({'symbol': SYMBOL, 'status':'OPENED'}):
         sell_id, buy_id = sell['sell_id'], sell['buy_id']
         r = get_order(s, sell_id)
-        cur_price = get_asset_price(s)
-        if r is None and cur_price > sell['orig_price']:
+        price = get_asset_price(s)
+        if r is None and price > sell['orig_price']:
             post_order(s, 'SELL', sell_id, sell['orig_price'], sell['orig_qty'])
         elif r is not None:
             executedQty         = float(r['executedQty'])
@@ -341,17 +392,8 @@ def start_thread(name, period):
     thread.start()
     return thread, stop_event, name, lockfp
 
-def debug():
-    s = requests.Session()
-    s.headers.update(DFT_API_HDRS)
-    r = get_order(s, '056aea28-7770-4815-8011-4aef6b537596')
-    trace()
-    #post_order(s, 160, 1)
-    exit(0)
-
 def lock(name):
     lockfile = f'/var/lock/monker.{name}'
-    loginfo(f'locking file {lockfile}')
     fp = open(lockfile, 'w')
     fp.flush()
     try:
@@ -383,8 +425,6 @@ if __name__ == '__main__':
     ## parse asset/market and build symbol name
     ASTMKT = args.asset.upper(), args.market.upper()
     SYMBOL = (args.asset + args.market).upper()
-    ## TODO check if symbol is available
-    ## TODO check if server is responding
     debug()
     ## starts the enabled threads
     loginfo('thread main started')
