@@ -15,8 +15,11 @@ except ImportError:
     from pdb import set_trace as trace
 
 ## market definition
-ASTMKT = None          ## tuple with pair asset,market (command line argument)
-SYMBOL = ''            ## market to trade on (joined asset,market pair)
+ASTMKT = None, None         ## tuple with pair asset,market
+SYMBOL = ''                 ## market to trade on (joined asset,market pair)
+
+MIN_NOTIONAL   = None       ## minimum price*qty of an order
+MAX_NUM_ORDERS = 5          ## binance 'apparently' supports up to 25
 
 ## binance keys and url
 KEY    = 'ZADfFZTF0Djk5HozzmbbPhK1TWqz9SROYaivOcQPbJPIEscP24Rhc8RzMGx7pvdz'
@@ -57,6 +60,7 @@ class MetaNotFound   (Exception): pass
 class FileLockFailed (Exception): pass
 class BadAPIResponse (Exception): pass
 class MarketNotFound (Exception): pass
+class SymbolNotFound (Exception): pass
 
 def logbuy(buy_id, price, qty, proft):
     stdout.write('BUY: ')
@@ -170,10 +174,6 @@ def post_order(s, side, id, price, qty):
                 recvWindow=5000,
                 newClientOrderId=id)
 
-def get_open_orders(s):
-    return get(s, '/api/v3/openOrders', True,
-               symbol=SYMBOL)
-
 def get_order(s, id):
     try:
         return get(s, '/api/v3/order', True,
@@ -198,6 +198,9 @@ def get_klines(s, interval, limit):
         klines.append(dict(zip(KLINES_LABELS, kline_values)))
     return klines
 
+def get_exchange_info(s):
+    return get(s, '/api/v1/exchangeInfo', False)
+
 def get_mrkt_info(s):
     r = get(s, '/api/v3/account', True)
     asset, market = ASTMKT
@@ -217,9 +220,21 @@ def get_mrkt_info(s):
         raise MarketNotFound
     return exps, blnc
 
-def get_asset_price(s):
-    obj = get(s, '/api/v3/avgPrice', False, symbol=SYMBOL)
-    return float(obj['price'])
+def get_bid_ask_price(s):
+    obj = get(s, '/api/v3/ticker/bookTicker', False, symbol=SYMBOL)
+    return float(obj['bidPrice']), float(obj['askPrice'])
+
+def get_min_notional():
+    s = requests.Session()
+    s.headers.update(DFT_API_HDRS)
+    r = get_exchange_info(s)
+    for symbol in r['symbols']:
+        if symbol['symbol'] == SYMBOL:
+            for filter in symbol['filters']:
+                if filter['filterType'] == 'MIN_NOTIONAL':
+                    return float(filter['minNotional'])
+    else:
+        raise SymbolNotFound
 
 def calculate_metric(s, interval, limit):
     klines = get_klines(s, interval, limit)
@@ -229,24 +244,23 @@ def calculate_metric(s, interval, limit):
     return diff
 
 def debug():
-    #s = requests.Session()
-    #s.headers.update(DFT_API_HDRS)
+    s = requests.Session()
+    s.headers.update(DFT_API_HDRS)
+    print(get_min_notional())
     exit(0)
 
 def maestro(s):
-    ## TODO: add logic to change params 'on the fly'
-    ## NOTE: the time difference between open/close of sell entries
-    ##       can be a very good indicative of the market mood (TBC)
     M = DB.meta.find_one({'symbol': SYMBOL, 'name': DIPSEEKER})
     if M is None:
         dipseeker = {
             'symbol'        : SYMBOL,
             'name'          : DIPSEEKER,
-            'INTERVAL'      : '5m',
+            'INTERVAL'      : '1m',
             'LIMIT'         : 5,
-            'BUDGET'        : 90.0,
-            'DTHR'          : 0.5*5,
-            'BUY_QTY'       : 0.1,
+            'BUDGET'        : 70.0,
+            'DTHR'          : 0.0,
+            'BUY_QTY'       : 0.0,
+            'MAX_NUM_ORDERS': MAX_NUM_ORDERS,
         }
     M = DB.meta.find_one({'symbol': SYMBOL, 'name': BUYER})
     if M is None:
@@ -268,9 +282,9 @@ def dipseeker(s):
     if M is None: raise MetaNotFound
     dip = get_accm_diff(s, M['INTERVAL'], M['LIMIT'])
     exps, blnc = get_mrkt_info(s)
-    price = get_asset_price(s)
+    bid_price, ask_price = get_bid_ask_price(s)
     lqdy = M['BUDGET'] - exps['total']
-    logstate(M['DTHR'], dip, exps['total'], blnc['total'], lqdy, price)
+    logstate(M['DTHR'], dip, exps['total'], blnc['total'], lqdy, ask_price)
     if dip < (-M['DTHR']):
         if lqdy < M['BUY_QTY']:
             logwarn('not enough liquidity')
@@ -279,7 +293,7 @@ def dipseeker(s):
         elif blnc['free'] < lqdy:
             logwarn('not enough free balance')
         else:
-            logbuy(str(uuid.uuid4()), price, M['BUY_QTY'], M['DTHR'])
+            logbuy(str(uuid.uuid4()), ask_price, M['BUY_QTY'], M['DTHR'])
 
 def buyer(s):
     M = DB.meta.find_one({'symbol': SYMBOL, 'name': BUYER})
@@ -333,8 +347,8 @@ def seller(s):
     for sell in DB.sell.find({'symbol': SYMBOL, 'status':'OPENED'}):
         sell_id, buy_id = sell['sell_id'], sell['buy_id']
         r = get_order(s, sell_id)
-        price = get_asset_price(s)
-        if r is None and price > sell['orig_price']:
+        bid_price, ask_price = get_bid_ask_price(s)
+        if r is None and bid_price > sell['orig_price']:
             post_order(s, 'SELL', sell_id, sell['orig_price'], sell['orig_qty'])
         elif r is not None:
             executedQty         = float(r['executedQty'])
@@ -422,19 +436,22 @@ def parse_args():
 
 if __name__ == '__main__':
     args = parse_args()
-    ## parse asset/market and build symbol name
-    ASTMKT = args.asset.upper(), args.market.upper()
-    SYMBOL = (args.asset + args.market).upper()
-    debug()
-    ## starts the enabled threads
     loginfo('thread main started')
     try:
+        ## set asset and market to operate on
+        ASTMKT = args.asset, args.market
+        SYMBOL = ''.join(ASTMKT)
+        debug()
+        ## set min price*qty of order, also checks connection and symbol 
+        MIN_NOTIONAL = get_min_notional()
+        ## starts the threads
         threads = []
         if not args.nomaestro:   threads.append(start_thread(MAESTRO,   30))
         time.sleep(1) ## ensures maestro can create meta collection first
         if not args.nodipseeker: threads.append(start_thread(DIPSEEKER, 30))
         if not args.nobuyer:     threads.append(start_thread(BUYER,     30))
         if not args.noseller:    threads.append(start_thread(SELLER,    30))
+        ## monitor all threads, in case anyone of them die, finish execution
         while True:
             time.sleep(1)
             for thread, stop, name, lockfp in threads:
