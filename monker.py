@@ -4,22 +4,22 @@ import argparse, fcntl
 
 from traceback import format_exc as exc
 from datetime import datetime
-from sys import stdout
+from pdb import set_trace as trace
 
 ## print more output to the terminal
 VERBOSE = True
 
 try:
-    from IPython import embed as trace
+    from IPython import embed
 except ImportError:
-    from pdb import set_trace as trace
+    pass
 
 ## market definition
-ASTMKT = None, None         ## tuple with pair asset,market
-SYMBOL = ''                 ## market to trade on (joined asset,market pair)
+ASTQUT = None, None         ## tuple with pair asset,quote
+SYMBOL = None               ## market to trade on (joined asset,quote pair)
 
-MIN_NOTIONAL   = None       ## minimum price*qty of an order
-MAX_NUM_ORDERS = 5          ## binance 'apparently' supports up to 25
+## exchange information (precision, min/max qty, etc)
+XCH = None
 
 ## binance keys and url
 KEY    = 'ZADfFZTF0Djk5HozzmbbPhK1TWqz9SROYaivOcQPbJPIEscP24Rhc8RzMGx7pvdz'
@@ -31,6 +31,7 @@ DFT_API_HDRS = {
     'X-MBX-APIKEY' : KEY,
 }
 
+## keywords for kline data from binance
 KLINES_LABELS = [
     'open_time',
     'open',
@@ -45,6 +46,16 @@ KLINES_LABELS = [
     'taker_quote_volume',
     'ignore',
 ]
+
+## color output for easy debugging on stdout
+black   = lambda text: '\033[0;30m' + str(text) + '\033[0m'
+red     = lambda text: '\033[0;31m' + str(text) + '\033[0m'
+green   = lambda text: '\033[0;32m' + str(text) + '\033[0m'
+yellow  = lambda text: '\033[0;33m' + str(text) + '\033[0m'
+blue    = lambda text: '\033[0;34m' + str(text) + '\033[0m'
+magenta = lambda text: '\033[0;35m' + str(text) + '\033[0m'
+cyan    = lambda text: '\033[0;36m' + str(text) + '\033[0m'
+white   = lambda text: '\033[0;37m' + str(text) + '\033[0m'
 
 ## metadata and thread names 
 MAESTRO   = 'maestro'
@@ -63,7 +74,6 @@ class MarketNotFound (Exception): pass
 class SymbolNotFound (Exception): pass
 
 def logbuy(buy_id, price, qty, proft):
-    stdout.write('BUY: ')
     obj = {
         'open_time' : datetime.now(), ## open time
         'close_time': '',             ## close time (updated later)
@@ -77,11 +87,10 @@ def logbuy(buy_id, price, qty, proft):
         'orig_qty'  : qty,            ## original order quantity
         'qty'       : 0.0,            ## final order quantity (updated later)
     }
-    if VERBOSE: print(obj)
+    if VERBOSE: print(magenta(obj))
     DB.buy.insert_one(obj)
 
 def logsell(sell_id, buy_id, price, qty):
-    stdout.write('SELL: ')
     obj = {
         'open_time' : datetime.now(), ## open time
         'close_time': '',             ## close time (updated later)
@@ -95,11 +104,22 @@ def logsell(sell_id, buy_id, price, qty):
         'orig_qty'  : qty,            ## original order quantity
         'qty'       : 0.0,            ## final order quantity (updated later)
     }
-    if VERBOSE: print(obj)
+    if VERBOSE: print(green(obj))
     DB.sell.insert_one(obj)
 
-def logstate(dthr, dip, exps, blnc, lqdy, price):
-    stdout.write('STATE: ')
+def logmeta(dipseeker, buyer, seller):
+    if VERBOSE:
+        print(cyan(dipseeker))
+        print(cyan(buyer))
+        print(cyan(seller))
+    DB.meta.update_one({'symbol': SYMBOL, 'name': DIPSEEKER},
+                       {"$set": dipseeker}, upsert=True)
+    DB.meta.update_one({'symbol': SYMBOL, 'name': BUYER},
+                       {"$set": buyer}, upsert=True)
+    DB.meta.update_one({'symbol': SYMBOL, 'name': SELLER},
+                       {"$set": seller}, upsert=True)
+
+def logstate(dthr, dip, exps, blnc, price):
     obj = {
         'time'   : datetime.now(),
         'symbol' : SYMBOL,
@@ -107,31 +127,31 @@ def logstate(dthr, dip, exps, blnc, lqdy, price):
         'dip'    : dip,
         'exps'   : exps,
         'blnc'   : blnc,
-        'lqdy'   : lqdy,
         'price'  : price,
     }
-    if VERBOSE: print(obj)
+    if VERBOSE: print(blue(obj))
     DB.dip.insert_one(obj)
 
-def logtext(level, text):
-    stdout.write('LOGGING: ')
+def logtext(level, text, colorf=None):
     obj = {
         'time'   : datetime.now(),
         'symbol' : SYMBOL,
         'level'  : level,
         'text'   : text,
     }
-    if VERBOSE: print(obj)
+    if VERBOSE:
+        text = colorf(str(obj)) if colorf is not None else str(obj)
+        print(text)
     DB.logging.insert_one(obj)
 
 def loginfo(text):
     logtext('info', text)
 
 def logwarn(text):
-    logtext('warn', text)
+    logtext('warn', text, yellow)
 
 def logerror(text):
-    logtext('error', text)
+    logtext('error', text, red)
 
 def sign(**params):
     q = urllib.parse.urlencode(params)
@@ -169,8 +189,8 @@ def post_order(s, side, id, price, qty):
                 type='LIMIT',
                 timeInForce='GTC',
                 newOrderRespType='RESULT',
-                quantity=qty,
-                price=price,
+                quantity=f'{qty:.{XCH["AST_PRECISION"]}f}',
+                price=f'{price:.{XCH["QUT_PRECISION"]}f}',
                 recvWindow=5000,
                 newClientOrderId=id)
 
@@ -198,19 +218,16 @@ def get_klines(s, interval, limit):
         klines.append(dict(zip(KLINES_LABELS, kline_values)))
     return klines
 
-def get_exchange_info(s):
-    return get(s, '/api/v1/exchangeInfo', False)
-
 def get_mrkt_info(s):
     r = get(s, '/api/v3/account', True)
-    asset, market = ASTMKT
+    asset, quote = ASTQUT
     exps, blnc = {}, {}
     for balance in r['balances']:
         if balance['asset'] == asset:
             exps['free'  ] = float(balance['free'])
             exps['locked'] = float(balance['locked'])
             exps['total' ] = exps['free'] + exps['locked']
-        if balance['asset'] == market:
+        if balance['asset'] == quote:
             blnc['free'  ] = float(balance['free'])
             blnc['locked'] = float(balance['locked'])
             blnc['total' ] = blnc['free'] + blnc['locked']
@@ -224,90 +241,106 @@ def get_bid_ask_price(s):
     obj = get(s, '/api/v3/ticker/bookTicker', False, symbol=SYMBOL)
     return float(obj['bidPrice']), float(obj['askPrice'])
 
-def get_min_notional():
+def get_exchange_info():
+    info = {}
     s = requests.Session()
     s.headers.update(DFT_API_HDRS)
-    r = get_exchange_info(s)
+    r = get(s, '/api/v1/exchangeInfo', False)
     for symbol in r['symbols']:
         if symbol['symbol'] == SYMBOL:
+            info['AST_PRECISION'] = int(symbol['baseAssetPrecision'])
+            info['QUT_PRECISION'] = int(symbol['quotePrecision'])
             for filter in symbol['filters']:
                 if filter['filterType'] == 'MIN_NOTIONAL':
-                    return float(filter['minNotional'])
+                    info['MIN_NOTIONAL'] = float(filter['minNotional'])
+                elif filter['filterType'] == 'LOT_SIZE':
+                    info['MIN_QTY']   = float(filter["minQty"])
+                    info['MAX_QTY']   = float(filter["maxQty"])
+                    info['STEP_SIZE'] = float(filter["stepSize"])
+                elif filter['filterType'] == 'PRICE_FILTER':
+                    info['MIN_PRICE']  = float(filter['minPrice'])
+                    info['MAX_PRICE']  = float(filter['maxPrice'])
+                    info['TICK_SIZE']  = float(filter['tickSize'])
+            break
     else:
         raise SymbolNotFound
+    ## binance 'apparently' supports up to 25 orders in the same market
+    info['MAX_NUM_ORDERS'] = 25
+    return info
 
-def calculate_metric(s, interval, limit):
+def get_mrkt_dip(s, interval, limit):
     klines = get_klines(s, interval, limit)
     diff = 0.0
     for i in range(0, limit-1):
         diff += (klines[i]['close'] - klines[i+1]['close'])
     return diff
 
-def debug():
-    s = requests.Session()
-    s.headers.update(DFT_API_HDRS)
-    print(get_min_notional())
-    exit(0)
+def fix_order(price, qty):
+    price = XCH['TICK_SIZE']*round(price/XCH['TICK_SIZE'])
+    price = max(XCH['MIN_PRICE'], price)
+    price = min(XCH['MAX_PRICE'], price)
+    qty = XCH['STEP_SIZE']*round(qty/XCH['STEP_SIZE'])
+    qty = max(XCH['MIN_QTY'], qty)
+    qty = min(XCH['MAX_QTY'], qty)
+    while (qty*price) < XCH['MIN_NOTIONAL']:
+        qty += XCH['STEP_SIZE']
+    return price, qty
 
 def maestro(s):
-    M = DB.meta.find_one({'symbol': SYMBOL, 'name': DIPSEEKER})
-    if M is None:
-        dipseeker = {
-            'symbol'        : SYMBOL,
-            'name'          : DIPSEEKER,
-            'INTERVAL'      : '1m',
-            'LIMIT'         : 5,
-            'BUDGET'        : 70.0,
-            'DTHR'          : 0.0,
-            'BUY_QTY'       : 0.0,
-            'MAX_NUM_ORDERS': MAX_NUM_ORDERS,
-        }
-    M = DB.meta.find_one({'symbol': SYMBOL, 'name': BUYER})
-    if M is None:
-        buyer = {
-            'symbol'        : SYMBOL,
-            'name'          : BUYER,
-            'BUY_TIMEOUT'   : 5*60,
-        }
-    M = DB.meta.find_one({'symbol': SYMBOL, 'name': SELLER})
-    if M is None:
-        seller = {
-            'symbol'        : SYMBOL,
-            'name'          : SELLER,
-            'SELL_TIMEOUT'  : 60*60,
-        }
+    bid_price, ask_price = get_bid_ask_price(s)
+    ## hardcoded values for testing on BTCUSDT
+    dipseeker = {
+        'symbol'        : SYMBOL,
+        'name'          : DIPSEEKER,
+        'INTERVAL'      : '1m',
+        'LIMIT'         : 5,
+        'BUDGET'        : 70.0,
+        'DTHR'          : XCH['MIN_NOTIONAL']/2,
+        'BUY_QTY'       : XCH['MIN_NOTIONAL']/ask_price,
+        'MAX_NUM_ORDERS': XCH['MAX_NUM_ORDERS'],
+    }
+    buyer = {
+        'symbol'        : SYMBOL,
+        'name'          : BUYER,
+        'BUY_TIMEOUT'   : 5*60,
+    }
+    seller = {
+        'symbol'        : SYMBOL,
+        'name'          : SELLER,
+        'SELL_TIMEOUT'  : 60*60,
+    }
+    logmeta(dipseeker, buyer, seller)
 
 def dipseeker(s):
     M = DB.meta.find_one({'symbol': SYMBOL, 'name': DIPSEEKER})
     if M is None: raise MetaNotFound
-    dip = get_accm_diff(s, M['INTERVAL'], M['LIMIT'])
+    dip = get_mrkt_dip(s, M['INTERVAL'], M['LIMIT'])
     exps, blnc = get_mrkt_info(s)
     bid_price, ask_price = get_bid_ask_price(s)
-    lqdy = M['BUDGET'] - exps['total']
-    logstate(M['DTHR'], dip, exps['total'], blnc['total'], lqdy, ask_price)
-    if dip < (-M['DTHR']):
-        if lqdy < M['BUY_QTY']:
-            logwarn('not enough liquidity')
-        elif blnc['total'] < lqdy:
-            logwarn('not enough balance')
-        elif blnc['free'] < lqdy:
+    logstate(M['DTHR'], dip, exps['total'], blnc['total'], ask_price)
+    if dip > M['DTHR']:
+        if blnc['free'] < (M['BUY_QTY']*ask_price):
             logwarn('not enough free balance')
         else:
             logbuy(str(uuid.uuid4()), ask_price, M['BUY_QTY'], M['DTHR'])
 
 def buyer(s):
+    log = lambda text: logtext('info', text, magenta)
     M = DB.meta.find_one({'symbol': SYMBOL, 'name': BUYER})
     if M is None: raise MetaNotFound
     for buy in DB.buy.find({'symbol': SYMBOL, 'status':'OPENED'}):
         buy_id = buy['buy_id']
         r = get_order(s, buy_id)
         if r is None:
-            post_order(s, 'BUY', buy_id, buy['orig_price'], buy['orig_qty'])
+            new_price, new_qty = fix_order(buy['orig_price'], buy['orig_qty'])
+            log(f'post new buy order id={buy_id}')
+            post_order(s, 'BUY', buy_id, new_price, new_qty)
         elif r is not None:
             executedQty         = float(r['executedQty'])
             cummulativeQuoteQty = float(r['cummulativeQuoteQty'])
             age_in_seconds      = (datetime.now() - buy['open_time']).seconds
             if r['status'] == 'FILLED':
+                log(f'buy order filled id={buy_id}')
                 sell_id = str(uuid.uuid4())
                 upd_fields = {
                     'close_time' : datetime.now(),
@@ -316,10 +349,11 @@ def buyer(s):
                     'price'      : cummulativeQuoteQty/executedQty,
                     'qty'        : executedQty,
                 }
-                DB.buy.update({'buy_id' : buy_id}, {"$set": upd_fields})
+                DB.buy.update_one({'buy_id' : buy_id}, {"$set": upd_fields})
                 sell_price = cummulativeQuoteQty/executedQty+buy['proft']
                 logsell(sell_id, buy_id, sell_price, executedQty)
             elif age_in_seconds > M['BUY_TIMEOUT']:
+                log(f'buy order timeout executed qty={buy["qty"]} id={buy_id}')
                 sell_id = str(uuid.uuid4())
                 delete_order(s, buy_id)
                 if executedQty > 0.0:
@@ -338,10 +372,10 @@ def buyer(s):
                         'close_time' : datetime.now(),
                         'status'     : 'CLOSED',
                     }
-                DB.buy.update({'buy_id' : buy_id}, {"$set": upd_fields})
+                DB.buy.update_one({'buy_id' : buy_id}, {"$set": upd_fields})
 
 def seller(s):
-    ## read metadate from DB
+    log = lambda text: logtext('info', text, green)
     M = DB.meta.find_one({'symbol': SYMBOL, 'name': SELLER})
     if M is None: raise MetaNotFound
     for sell in DB.sell.find({'symbol': SYMBOL, 'status':'OPENED'}):
@@ -349,20 +383,24 @@ def seller(s):
         r = get_order(s, sell_id)
         bid_price, ask_price = get_bid_ask_price(s)
         if r is None and bid_price > sell['orig_price']:
-            post_order(s, 'SELL', sell_id, sell['orig_price'], sell['orig_qty'])
+            new_price, new_qty = fix_order(sell['orig_price'], sell['orig_qty'])
+            log(f'post new sell order id={sell_id}')
+            post_order(s, 'SELL', sell_id, new_price, new_qty)
         elif r is not None:
             executedQty         = float(r['executedQty'])
             cummulativeQuoteQty = float(r['cummulativeQuoteQty'])
             age_in_seconds      = (datetime.now() - sell['open_time']).seconds
             if r['status'] == 'FILLED':
+                log(f'sell order filled id={sell_id}')
                 upd_fields = {
                     'close_time' : datetime.now(),
                     'status'     : 'CLOSED',
                     'price'      : cummulativeQuoteQty/executedQty,
                     'qty'        : executedQty,
                 }
-                DB.sell.update({'sell_id' : sell_id}, {"$set": upd_fields})
+                DB.sell.update_one({'sell_id' : sell_id}, {"$set": upd_fields})
             elif age_in_seconds > M['SELL_TIMEOUT']:
+                log(f'sell order timeout executed qty={sell["qty"]} id={sell_id}')
                 delete_order(s, sell_id)
                 sell_id2 = str(uuid.uuid4())
                 upd_fields = {
@@ -372,7 +410,7 @@ def seller(s):
                     'price'      : cummulativeQuoteQty/executedQty if executedQty > 0.0 else 0.0,
                     'qty'        : executedQty,
                 }
-                DB.sell.update({'sell_id' : sell_id}, {"$set": upd_fields})
+                DB.sell.update_one({'sell_id' : sell_id}, {"$set": upd_fields})
                 open_qty = sell['orig_qty'] - sell['qty']
                 logsell(sell_id2, buy_id, sell['orig_price'], open_qty)
 
@@ -422,8 +460,8 @@ def unlock(fp):
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("asset",  help="asset to buy/sell")
-    parser.add_argument("market", help="market to trade on")
+    parser.add_argument("asset", help="asset to buy/sell")
+    parser.add_argument("quote", help="quote for asset")
     parser.add_argument("--nomaestro", action='store_true',
                         help="disables maestro thread")
     parser.add_argument("--nodipseeker", action='store_true',
@@ -436,30 +474,30 @@ def parse_args():
 
 if __name__ == '__main__':
     args = parse_args()
+    ## set market to operate on
+    ASTQUT = args.asset, args.quote
+    SYMBOL = ''.join(ASTQUT)
     loginfo('thread main started')
     try:
-        ## set asset and market to operate on
-        ASTMKT = args.asset, args.market
-        SYMBOL = ''.join(ASTMKT)
-        debug()
         ## set min price*qty of order, also checks connection and symbol 
-        MIN_NOTIONAL = get_min_notional()
+        XCH = get_exchange_info()
         ## starts the threads
         threads = []
-        if not args.nomaestro:   threads.append(start_thread(MAESTRO,   30))
+        if not args.nomaestro:   threads.append(start_thread(MAESTRO,   10))
         time.sleep(1) ## ensures maestro can create meta collection first
-        if not args.nodipseeker: threads.append(start_thread(DIPSEEKER, 30))
-        if not args.nobuyer:     threads.append(start_thread(BUYER,     30))
-        if not args.noseller:    threads.append(start_thread(SELLER,    30))
+        if not args.nodipseeker: threads.append(start_thread(DIPSEEKER, 10))
+        if not args.nobuyer:     threads.append(start_thread(BUYER,     10))
+        if not args.noseller:    threads.append(start_thread(SELLER,    10))
         ## monitor all threads, in case anyone of them die, finish execution
-        while True:
+        is_fatal_error = False
+        while not is_fatal_error:
             time.sleep(1)
             for thread, stop, name, lockfp in threads:
                 if not thread.is_alive():
-                    logerror('thread {name} died')
-                    break
+                    logerror(f'thread {name} died')
+                    is_fatal_error = True
     except KeyboardInterrupt:
-        loginfo('ctrl-c pressed')
+        logwarn('ctrl-c pressed')
     except Exception:
         logerror(exc())
     finally:
