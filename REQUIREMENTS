@@ -1,6 +1,4 @@
 requests
 websocket-client
 pymongo
-ipython
-flask
-pandas
+eve

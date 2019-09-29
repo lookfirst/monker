@@ -1,19 +1,29 @@
-import json
+from eve import Eve
+from flask import render_template
 
-from flask import Flask, render_template
-import pandas as pd
+## check eve docs:
+## https://docs.python-eve.org/en/stable/features.html
 
-app = Flask(__name__)
+settings = {
+    'MONGO_HOST': 'localhost',
+    'MONGO_PORT': 27017,
+    'MONGO_DBNAME': 'monker',
+    'ALLOW_UNKNOWN' : True,
+    'DOMAIN': {
+        'meta'    : {},
+        'dip'     : {}, ## TODO change to state
+        'buy'     : {},
+        'sell'    : {},
+        'logging' : {},
+    }
+}
 
-@app.route("/")
+app = Eve(settings=settings)
+
+@app.route("/dash")
 def index():
-    df = pd.read_csv('data.csv').drop('Open', axis=1)
-    chart_data = df.to_dict(orient='records')
-    chart_data = json.dumps(chart_data, indent=2)
-    data = {'chart_data': chart_data}
-    return render_template("index.html", data=data)
-
+    return open('dash.html').read()
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(host='127.0.0.1', port=5000, debug=True)
 

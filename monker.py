@@ -130,6 +130,7 @@ def logstate(dthr, dip, exps, blnc, price):
         'price'  : price,
     }
     if VERBOSE: print(blue(obj))
+    ## TODO change collection name to state
     DB.dip.insert_one(obj)
 
 def logtext(level, text, colorf=None):
@@ -294,8 +295,8 @@ def maestro(s):
         'name'          : DIPSEEKER,
         'INTERVAL'      : '1m',
         'LIMIT'         : 5,
-        'BUDGET'        : 70.0,
-        'DTHR'          : XCH['MIN_NOTIONAL']/2,
+        'BUDGET'        : 75.0,
+        'DTHR'          : XCH['MIN_NOTIONAL']*2,
         'BUY_QTY'       : XCH['MIN_NOTIONAL']/ask_price,
         'MAX_NUM_ORDERS': XCH['MAX_NUM_ORDERS'],
     }
