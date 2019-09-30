@@ -74,7 +74,7 @@ var context = svg.append("g")
 
 var parseTime = d3.timeParse("%a, %d %b %Y %H:%M:%S GMT");
 
-d3.json("/dip?page=1", function(data) {
+d3.json("/state?page=1", function(data) {
   data = data._items;
   data.forEach( d => {
     d.time = parseTime(d.time);

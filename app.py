@@ -11,7 +11,7 @@ settings = {
     'ALLOW_UNKNOWN' : True,
     'DOMAIN': {
         'meta'    : {},
-        'dip'     : {}, ## TODO change to state
+        'state'   : {}, ## TODO change to state
         'buy'     : {},
         'sell'    : {},
         'logging' : {},
