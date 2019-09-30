@@ -339,7 +339,7 @@ def buyer(s):
             log(f'post new buy order id={buy_id}')
             try:
                 post_order(s, 'BUY', buy_id, new_price, new_qty)
-            except InsufficientBalance as e:
+            except InsufficientBalance:
                 logwarn('buy order insufficient balance')
                 DB.buy.delete_one({'buy_id': buy_id})
         elif r is not None:
@@ -437,7 +437,7 @@ def thread_entry(stop_event, name, period):
             elif name == DIPSEEKER: dipseeker(s)
             elif name == BUYER:     buyer(s)
             elif name == SELLER:    seller(s)
-            else: raise NotImplemented
+            else: raise NotImplementedError
     except Exception:
         logerror(exc())
     finally:
