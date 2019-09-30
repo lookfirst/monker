@@ -67,13 +67,14 @@ SELLER    = 'seller'
 DB_CLIENT = pymongo.MongoClient('mongodb://localhost:27017/')
 DB        = DB_CLIENT.monker
 
-class MetaNotFound   (Exception): pass
-class FileLockFailed (Exception): pass
-class BadAPIResponse (Exception): pass
-class MarketNotFound (Exception): pass
-class SymbolNotFound (Exception): pass
+class MetaNotFound        (Exception): pass
+class FileLockFailed      (Exception): pass
+class MarketNotFound      (Exception): pass
+class SymbolNotFound      (Exception): pass
+class BadAPIResponse      (Exception): pass
+class InsufficientBalance (Exception): pass
 
-def logbuy(buy_id, price, qty, proft):
+def db_insert_buy(buy_id, price, qty, proft):
     obj = {
         'open_time' : datetime.now(), ## open time
         'close_time': '',             ## close time (updated later)
@@ -87,10 +88,10 @@ def logbuy(buy_id, price, qty, proft):
         'orig_qty'  : qty,            ## original order quantity
         'qty'       : 0.0,            ## final order quantity (updated later)
     }
-    if VERBOSE: print(magenta(obj))
     DB.buy.insert_one(obj)
+    return obj
 
-def logsell(sell_id, buy_id, price, qty):
+def db_insert_sell(sell_id, buy_id, price, qty):
     obj = {
         'open_time' : datetime.now(), ## open time
         'close_time': '',             ## close time (updated later)
@@ -104,22 +105,19 @@ def logsell(sell_id, buy_id, price, qty):
         'orig_qty'  : qty,            ## original order quantity
         'qty'       : 0.0,            ## final order quantity (updated later)
     }
-    if VERBOSE: print(green(obj))
     DB.sell.insert_one(obj)
+    return obj
 
-def logmeta(dipseeker, buyer, seller):
-    if VERBOSE:
-        print(cyan(dipseeker))
-        print(cyan(buyer))
-        print(cyan(seller))
+def db_update_meta(dipseeker, buyer, seller):
     DB.meta.update_one({'symbol': SYMBOL, 'name': DIPSEEKER},
                        {"$set": dipseeker}, upsert=True)
     DB.meta.update_one({'symbol': SYMBOL, 'name': BUYER},
                        {"$set": buyer}, upsert=True)
     DB.meta.update_one({'symbol': SYMBOL, 'name': SELLER},
                        {"$set": seller}, upsert=True)
+    return dipseeker, buyer, seller
 
-def logstate(dthr, dip, exps, blnc, price):
+def db_insert_state(dthr, dip, exps, blnc, price):
     obj = {
         'time'   : datetime.now(),
         'symbol' : SYMBOL,
@@ -129,9 +127,8 @@ def logstate(dthr, dip, exps, blnc, price):
         'blnc'   : blnc,
         'price'  : price,
     }
-    if VERBOSE: print(blue(obj))
-    ## TODO change collection name to state
-    DB.dip.insert_one(obj)
+    DB.state.insert_one(obj)
+    return obj
 
 def logtext(level, text, colorf=None):
     obj = {
@@ -170,8 +167,11 @@ def api(method, uri, is_signed, **params):
         text = f'server error ({r.status_code}, {obj["code"]}): {obj["msg"]}'
         raise BadAPIResponse(text)
     elif r.status_code >= 400:
-        text = f'bad request ({r.status_code}, {obj["code"]}): {obj["msg"]}'
-        raise BadAPIResponse(text)
+        if obj['code'] == -2010:
+            raise InsufficientBalance
+        else:
+            text = f'bad request ({r.status_code}, {obj["code"]}): {obj["msg"]}'
+            raise BadAPIResponse(text)
     return obj
 
 def get(s, uri, is_signed, **params):
@@ -288,6 +288,7 @@ def fix_order(price, qty):
     return price, qty
 
 def maestro(s):
+    log = lambda text: logtext('info', text, cyan)
     bid_price, ask_price = get_bid_ask_price(s)
     ## hardcoded values for testing on BTCUSDT
     dipseeker = {
@@ -310,20 +311,21 @@ def maestro(s):
         'name'          : SELLER,
         'SELL_TIMEOUT'  : 60*60,
     }
-    logmeta(dipseeker, buyer, seller)
+    log(db_update_meta(dipseeker, buyer, seller))
 
 def dipseeker(s):
+    log = lambda text: logtext('info', text, blue)
     M = DB.meta.find_one({'symbol': SYMBOL, 'name': DIPSEEKER})
     if M is None: raise MetaNotFound
     dip = get_mrkt_dip(s, M['INTERVAL'], M['LIMIT'])
     exps, blnc = get_mrkt_info(s)
     bid_price, ask_price = get_bid_ask_price(s)
-    logstate(M['DTHR'], dip, exps['total'], blnc['total'], ask_price)
+    log(db_insert_state(M['DTHR'], dip, exps['total'], blnc['total'], ask_price))
     if dip > M['DTHR']:
         if blnc['free'] < (M['BUY_QTY']*ask_price):
             logwarn('not enough free balance')
         else:
-            logbuy(str(uuid.uuid4()), ask_price, M['BUY_QTY'], M['DTHR'])
+            log(db_insert_buy(str(uuid.uuid4()), ask_price, M['BUY_QTY'], M['DTHR']))
 
 def buyer(s):
     log = lambda text: logtext('info', text, magenta)
@@ -335,7 +337,11 @@ def buyer(s):
         if r is None:
             new_price, new_qty = fix_order(buy['orig_price'], buy['orig_qty'])
             log(f'post new buy order id={buy_id}')
-            post_order(s, 'BUY', buy_id, new_price, new_qty)
+            try:
+                post_order(s, 'BUY', buy_id, new_price, new_qty)
+            except InsufficientBalance as e:
+                logwarn('buy order insufficient balance')
+                DB.buy.delete_one({'buy_id': buy_id})
         elif r is not None:
             executedQty         = float(r['executedQty'])
             cummulativeQuoteQty = float(r['cummulativeQuoteQty'])
@@ -352,7 +358,7 @@ def buyer(s):
                 }
                 DB.buy.update_one({'buy_id' : buy_id}, {"$set": upd_fields})
                 sell_price = cummulativeQuoteQty/executedQty+buy['proft']
-                logsell(sell_id, buy_id, sell_price, executedQty)
+                log(db_insert_sell(sell_id, buy_id, sell_price, executedQty))
             elif age_in_seconds > M['BUY_TIMEOUT']:
                 log(f'buy order timeout executed qty={buy["qty"]} id={buy_id}')
                 sell_id = str(uuid.uuid4())
@@ -367,7 +373,7 @@ def buyer(s):
                         'qty'        : executedQty,
                     }
                     sell_price = cummulativeQuoteQty/executedQty+buy['proft']
-                    logsell(sell_id, buy_id, sell_price, executedQty)
+                    log(db_insert_sell(sell_id, buy_id, sell_price, executedQty))
                 else:
                     upd_fields = {
                         'close_time' : datetime.now(),
@@ -413,7 +419,7 @@ def seller(s):
                 }
                 DB.sell.update_one({'sell_id' : sell_id}, {"$set": upd_fields})
                 open_qty = sell['orig_qty'] - sell['qty']
-                logsell(sell_id2, buy_id, sell['orig_price'], open_qty)
+                log(db_insert_sell(sell_id2, buy_id, sell['orig_price'], open_qty))
 
 def thread_entry(stop_event, name, period):
     try:
