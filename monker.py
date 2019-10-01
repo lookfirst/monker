@@ -333,6 +333,8 @@ def buyer(s):
     if M is None: raise MetaNotFound
     for buy in DB.buy.find({'symbol': SYMBOL, 'status':'OPENED'}):
         buy_id = buy['buy_id']
+        ## TODO create new status so that I don't have to check for order all
+        ##      the time
         r = get_order(s, buy_id)
         if r is None:
             new_price, new_qty = fix_order(buy['orig_price'], buy['orig_qty'])
@@ -424,20 +426,26 @@ def seller(s):
 def thread_entry(stop_event, name, period):
     try:
         cnter = -1
+        s = None
         loginfo(f'thread {name} started')
-        s = requests.Session()
-        s.headers.update(DFT_API_HDRS)
         while not stop_event.is_set():
-            ## ensure thread period is respected
-            time.sleep(1)
-            cnter = (cnter + 1) % period
-            if cnter != 0: continue
-            ## call appropriated function
-            if   name == MAESTRO:   maestro(s)
-            elif name == DIPSEEKER: dipseeker(s)
-            elif name == BUYER:     buyer(s)
-            elif name == SELLER:    seller(s)
-            else: raise NotImplementedError
+            try:
+                if s is None:
+                    s = requests.Session()
+                    s.headers.update(DFT_API_HDRS)
+                ## ensure thread period is respected
+                time.sleep(1)
+                cnter = (cnter + 1) % period
+                if cnter != 0: continue
+                ## call appropriated function
+                if   name == MAESTRO:   maestro(s)
+                elif name == DIPSEEKER: dipseeker(s)
+                elif name == BUYER:     buyer(s)
+                elif name == SELLER:    seller(s)
+                else: raise NotImplementedError
+            except requests.exceptions.ConnectionError:
+                logwarn('connection error')
+                s = None
     except Exception:
         logerror(exc())
     finally:
