@@ -1,5 +1,12 @@
 Create python environment:
+
   $ sudo apt install python3-pip python3-virtualenv virtualenv mongodb
   $ virtualenv -p /usr/bin/python3 tmp/monker
   $ source tmp/monker/bin/activate.csh
   $ pip install -r PRDREQ
+
+Run the bot:
+
+  $ python monker.py
+  
+Files in archive are no longer used. There is ongoing development of a D3 powered real time performance monitor website.
