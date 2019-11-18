@@ -4,6 +4,7 @@ import argparse, fcntl
 
 from traceback import format_exc as exc
 from datetime import datetime
+from os import environ as env
 from pdb import set_trace as trace
 
 ## print more output to the terminal
@@ -22,8 +23,8 @@ SYMBOL = None               ## market to trade on (joined asset,quote pair)
 XCH = None
 
 ## binance keys and url
-KEY    = 'ZADfFZTF0Djk5HozzmbbPhK1TWqz9SROYaivOcQPbJPIEscP24Rhc8RzMGx7pvdz'
-SECRET = '5SNpXT5wRqDBgEfvl7b2gTLq1fKnNqDmteFZMwXfrbOBKDLSt4QHA7Vu1UcIejYx'
+KEY    = env['API_KEY']
+SECRET = env['API_SECRET']
 URL    = 'https://api.binance.com'
 DFT_API_HDRS = {
     'Accept'       : 'application/x-www-form-urlencoded',
